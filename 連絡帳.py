@@ -25,7 +25,6 @@ SCOPES = [
 
 
 # アプリケーション設定
-# 修正箇所: st.secrets["app_settings"]["キー名"] に変更
 GENERAL_CONTACTS_SHEET_ID = st.secrets["app_settings"]["general_contacts_sheet_id"]
 STUDENTS_SHEET_ID = st.secrets["app_settings"]["students_sheet_id"]
 TEACHERS_SHEET_ID = st.secrets["app_settings"]["teachers_sheet_id"]
@@ -48,7 +47,6 @@ if 'associated_students_data' not in st.session_state:
 # --- ヘルパー関数 ---
 def get_service_account_info():
     """Streamlit SecretsからGspreadサービスアカウント情報を取得"""
-    # 修正箇所: st.secrets["gspread_service_account"]["キー名"] に変更
     return {
         "type": st.secrets["gspread_service_account"]["type"],
         "project_id": st.secrets["gspread_service_account"]["project_id"],
@@ -178,7 +176,6 @@ def authenticate_google_oauth():
                 creds = None
         
         if not creds:
-            # 修正箇所: st.secrets["gcp_oauth"]["キー名"] に変更
             client_config = {
                 "web": {
                     "client_id": st.secrets["gcp_oauth"]["client_id"],
@@ -191,7 +188,6 @@ def authenticate_google_oauth():
                     "javascript_origins": st.secrets["gcp_oauth"]["javascript_origins"]
                 }
             }
-            # 修正箇所: st.secrets["gcp_oauth"]["redirect_uris"][0] に変更
             redirect_uri = st.secrets["gcp_oauth"]["redirect_uris"][0]
 
             flow = Flow.from_client_config(
@@ -202,6 +198,7 @@ def authenticate_google_oauth():
 
             st.session_state.auth_url = auth_url
             
+            # 修正箇所: st.query_params を使用
             query_params = st.query_params
             if 'code' in query_params:
                 try:
@@ -209,7 +206,14 @@ def authenticate_google_oauth():
                     st.session_state.credentials = flow.credentials
                     st.session_state.logged_in = True
                     st.success("ログインしました！")
-                    st.experimental_set_query_params()
+                    
+                    # 修正箇所: st.query_params を使用してクエリパラメータをクリア
+                    # st.query_params は辞書のように扱えるため、キーを指定して削除
+                    del st.query_params['code'] # 'code' パラメータを削除
+                    # 他の不要なクエリパラメータも削除する場合は同様に行う
+                    # for param in list(st.query_params.keys()):
+                    #    del st.query_params[param]
+
                     st.rerun()
                 except Exception as e:
                     st.error(f"認証コードの処理中にエラーが発生しました: {e}")
@@ -283,7 +287,9 @@ def main():
             st.session_state.user_info = None
             st.session_state.user_role = None
             st.session_state.associated_students_data = []
-            st.experimental_set_query_params()
+            # 修正箇所: st.query_params を使用してクエリパラメータをクリア
+            for param in list(st.query_params.keys()):
+                del st.query_params[param]
             st.rerun()
 
         st.sidebar.header("ナビゲーション")
