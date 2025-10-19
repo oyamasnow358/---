@@ -1,5 +1,3 @@
-# app.py (修正後の全体コード)
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
@@ -24,6 +22,9 @@ SCOPES = [
     'openid'
 ]
 
+# NEW: プライバシーポリシーと利用規約のURLを定数として追加
+PRIVACY_POLICY_URL = "https://docs.google.com/document/d/1uJX0GOorVXEutA7IKJOyBG6tZrLDesE7y_zAZGbSsKg/edit?tab=t.0"
+TERMS_OF_SERVICE_URL = "https://docs.google.com/document/d/171oLSgxk55KCZhdTSJf0R3ibTWoIQPPrlQvz8EgAA0s/edit?tab=t.0"
 
 # アプリケーション設定（シート名を読み込むように変更）
 GENERAL_CONTACTS_SHEET_NAME = st.secrets["app_settings"]["general_contacts_sheet_name"]
@@ -261,6 +262,9 @@ def authenticate_google_oauth():
                     st.session_state.credentials = None
             else:
                 st.sidebar.markdown(f'[Googleアカウントでログイン]({st.session_state.auth_url})', unsafe_allow_html=True)
+                # NEW: プライバシーポリシーと利用規約のリンクをログインボタンの下に追加
+                st.sidebar.markdown(f'[プライバシーポリシー]({PRIVACY_POLICY_URL})', unsafe_allow_html=True)
+                st.sidebar.markdown(f'[利用規約]({TERMS_OF_SERVICE_URL})', unsafe_allow_html=True)
                 st.warning("ログインしてください。")
                 st.stop()
     
@@ -1029,6 +1033,10 @@ def main():
         st.markdown("- 画像付きで視覚的にわかりやすい連絡が可能")
         st.markdown("- 過去のやり取りを自動保存し、振り返りや支援記録にも活用可能")
         
+        st.markdown("---")
+        # NEW: ログイン前のトップページにプライバシーポリシーと利用規約のリンクを追加
+        st.markdown(f"当アプリをご利用になる前に、[プライバシーポリシー]({PRIVACY_POLICY_URL})と[利用規約]({TERMS_OF_SERVICE_URL})をご確認ください。", unsafe_allow_html=True)
+
         st.markdown("新しい教育ツールのイメージです。")
         
 if __name__ == "__main__":
