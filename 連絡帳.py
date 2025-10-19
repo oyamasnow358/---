@@ -47,6 +47,9 @@ if 'associated_students_data' not in st.session_state:
 # --- ヘルパー関数 ---
 def get_service_account_info():
     """Streamlit SecretsからGspreadサービスアカウント情報を取得"""
+    # デバッグ用に読み込まれた情報を表示してみる
+    # st.sidebar.write("Service Account Info Loaded:")
+    # st.sidebar.json(st.secrets["gspread_service_account"])
     return {
         "type": st.secrets["gspread_service_account"]["type"],
         "project_id": st.secrets["gspread_service_account"]["project_id"],
@@ -66,10 +69,13 @@ def get_gspread_client():
     """Gspreadクライアントを初期化（サービスアカウント認証）"""
     try:
         service_account_info = get_service_account_info()
+        # st.sidebar.write("Attempting gspread client initialization...")
         gc = gspread.service_account_from_dict(service_account_info)
+        # st.sidebar.success("gspreadクライアントが正常に初期化されました。")
         return gc
     except Exception as e:
         st.error(f"Gspreadクライアントの初期化に失敗しました: {e}")
+        st.exception(e) # Streamlitで詳細なスタックトレースを表示
         return None
 
 @st.cache_data(ttl=60)
@@ -77,8 +83,11 @@ def load_sheet_data(spreadsheet_id, worksheet_name="シート1"): # デフォル
     """Googleスプレッドシートから指定シートのデータを読み込む"""
     gc = get_gspread_client()
     if gc is None:
+        st.error("スプレッドシートの読み込みに失敗しました: Gspreadクライアントが利用できません。")
         return pd.DataFrame()
     try:
+        # デバッグのためにどのシートにアクセスしようとしているか表示
+        # st.sidebar.write(f"Accessing spreadsheet ID: {spreadsheet_id}")
         spreadsheet = gc.open_by_id(spreadsheet_id)
         worksheet = spreadsheet.worksheet(worksheet_name)
         data = worksheet.get_all_records()
@@ -89,6 +98,7 @@ def load_sheet_data(spreadsheet_id, worksheet_name="シート1"): # デフォル
         return pd.DataFrame()
     except Exception as e:
         st.error(f"スプレッドシートID '{spreadsheet_id}' の読み込み中にエラーが発生しました: {e}")
+        st.exception(e) # Streamlitで詳細なスタックトレースを表示
         return pd.DataFrame()
 
 def append_row_to_sheet(spreadsheet_id, new_record, worksheet_name="シート1"):
@@ -106,6 +116,7 @@ def append_row_to_sheet(spreadsheet_id, new_record, worksheet_name="シート1")
         return True
     except Exception as e:
         st.error(f"スプレッドシートID '{spreadsheet_id}' へのデータ追加中にエラーが発生しました: {e}")
+        st.exception(e)
         return False
 
 def update_row_in_sheet(spreadsheet_id, row_index, data_to_update, worksheet_name="シート1"):
@@ -125,6 +136,7 @@ def update_row_in_sheet(spreadsheet_id, row_index, data_to_update, worksheet_nam
         return True
     except Exception as e:
         st.error(f"スプレッドシートID '{spreadsheet_id}' の行更新中にエラーが発生しました: {e}")
+        st.exception(e)
         return False
 
 def upload_to_drive(file_obj, file_name, mime_type, credentials):
@@ -159,6 +171,7 @@ def upload_to_drive(file_obj, file_name, mime_type, credentials):
         return web_view_link
     except Exception as e:
         st.error(f"Google Driveへのアップロード中にエラーが発生しました: {e}")
+        st.exception(e)
         return None
 
 # --- Google OAuth認証関数 ---
@@ -172,6 +185,7 @@ def authenticate_google_oauth():
                 st.session_state.credentials = creds
             except Exception as e:
                 st.error(f"トークンのリフレッシュに失敗しました: {e}")
+                st.exception(e)
                 st.session_state.credentials = None
                 creds = None
         
@@ -217,6 +231,7 @@ def authenticate_google_oauth():
                     st.rerun()
                 except Exception as e:
                     st.error(f"認証コードの処理中にエラーが発生しました: {e}")
+                    st.exception(e)
                     st.session_state.logged_in = False
                     st.session_state.credentials = None
             else:
@@ -231,8 +246,14 @@ def authenticate_google_oauth():
             st.session_state.user_info = user_info
             
             # 教員・生徒データ読み込み
+            # ここでload_sheet_dataが失敗する可能性があるので、エラーハンドリングを強化
             teachers_df = load_sheet_data(TEACHERS_SHEET_ID)
             students_df = load_sheet_data(STUDENTS_SHEET_ID)
+
+            if teachers_df.empty or students_df.empty:
+                st.error("教師または生徒のスプレッドシートが読み込めませんでした。サービスアカウントの権限とシートIDを確認してください。")
+                st.session_state.logged_in = False
+                st.stop()
 
             user_email = user_info['email']
             
@@ -257,6 +278,7 @@ def authenticate_google_oauth():
                 
         except Exception as e:
             st.error(f"ユーザー情報の取得または役割判定中にエラーが発生しました: {e}")
+            st.exception(e)
             st.session_state.logged_in = False
             st.session_state.credentials = None
             st.session_state.user_info = None
@@ -322,12 +344,14 @@ def main():
                         break
                 if selected_student_sheet_id is None:
                     st.error(f"生徒 '{selected_student_name}' の個別連絡シートIDが見つかりません。")
-                    st.stop()
-
+                    # st.stop() # ここでstopすると、シートIDがない場合に画面が真っ白になるため、ユーザー体験を考慮して削除
+                                # 代わりに、その後の処理で selected_student_sheet_id が None の場合のハンドリングを行う
+            
+            # ここから各メニューの処理（変更なし）
             if menu_selection == "個別連絡作成":
                 if selected_student_name == "全体":
                     st.warning("個別連絡作成では「全体」を選択できません。特定の生徒を選択してください。")
-                elif selected_student_sheet_id:
+                elif selected_student_sheet_id: # selected_student_sheet_id が None でないことを確認
                     st.header(f"個別連絡作成: {selected_student_name} 宛")
                     with st.form("individual_contact_form", clear_on_submit=True):
                         contact_date = st.date_input("連絡対象日付", datetime.now().date())
@@ -345,7 +369,7 @@ def main():
                                 if uploaded_file:
                                     with st.spinner("画像をGoogle Driveにアップロード中..."):
                                         image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
-                                if image_url is None:
+                                if image_url is None: # upload_to_driveでエラーが発生した場合
                                     st.error("画像アップロードに失敗しました。再度お試しください。")
                                 else:
                                     new_record = {
@@ -364,6 +388,10 @@ def main():
                                         st.balloons()
                                     else:
                                         st.error("個別連絡の送信に失敗しました。")
+                else:
+                    if selected_student_name != "全体":
+                        st.info("生徒の個別連絡シートIDが見つからないため、個別連絡を作成できません。")
+
 
             elif menu_selection == "全体連絡作成":
                 st.header("全体連絡作成")
