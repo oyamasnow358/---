@@ -9,7 +9,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload # MediaIoBaseUpload を追加
 
 # --- Streamlit Secretsからの設定読み込み ---
 # .streamlit/secrets.toml に設定してください。
@@ -162,7 +162,7 @@ def update_row_in_sheet(identifier, row_index, data_to_update, identifier_type="
         st.exception(e)
         return False
 
-# upload_to_drive関数は変更なし（Drive APIはIDで操作するのが一般的）
+# upload_to_drive関数を修正
 def upload_to_drive(file_obj, file_name, mime_type, credentials):
     """Google Driveにファイルをアップロードし、共有可能なURLを返す"""
     try:
@@ -171,8 +171,12 @@ def upload_to_drive(file_obj, file_name, mime_type, credentials):
             'name': file_name,
             'parents': [DRIVE_FOLDER_ID]
         }
-        media = MediaFileUpload(
-            io.BytesIO(file_obj.read()),
+        
+        # MediaFileUpload の代わりに MediaIoBaseUpload を使用
+        # Streamlitのfile_uploaderが返すUploadedFileオブジェクトは
+        # read()メソッドを持つファイルライクオブジェクトなので、MediaIoBaseUploadに直接渡せます。
+        media = MediaIoBaseUpload(
+            file_obj, 
             mimetype=mime_type,
             resumable=True
         )
@@ -390,28 +394,33 @@ def main():
                                 image_url = ""
                                 if uploaded_file:
                                     with st.spinner("画像をGoogle Driveにアップロード中..."):
-                                        uploaded_file.seek(0) # ファイルポインタを先頭に戻す
+                                        # uploaded_file は Streamlit が提供する UploadedFile オブジェクトで、
+                                        # read(), seek() メソッドを持つファイルライクオブジェクトです。
+                                        # MediaIoBaseUpload に直接渡すために .seek(0) を行う
+                                        uploaded_file.seek(0) 
                                         image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
-                                if image_url is None:
-                                    st.error("画像アップロードに失敗しました。再度お試しください。")
+                                    if image_url is None: # upload_to_driveでエラーが発生した場合
+                                        st.error("画像アップロードに失敗しました。再度お試しください。")
+                                        # ここで処理を中断して、二重にエラーメッセージを出さないようにする
+                                        st.stop() # あるいは return
+                                        
+                                new_record = {
+                                    "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
+                                    "date": contact_date.strftime("%Y/%m/%d"),
+                                    "sender": user_name,
+                                    "message": school_message,
+                                    "home_reply": "",
+                                    "items_notice": items_notice,
+                                    "remarks": remarks,
+                                    "image_url": image_url,
+                                    "read_status": "未読"
+                                }
+                                # 個別シートは名前でアクセス
+                                if append_row_to_sheet(selected_individual_sheet_name, new_record, identifier_type="name"): # identifier_type="name" に変更
+                                    st.success(f"個別連絡を {selected_student_name} に送信しました！")
+                                    st.balloons()
                                 else:
-                                    new_record = {
-                                        "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
-                                        "date": contact_date.strftime("%Y/%m/%d"),
-                                        "sender": user_name,
-                                        "message": school_message,
-                                        "home_reply": "",
-                                        "items_notice": items_notice,
-                                        "remarks": remarks,
-                                        "image_url": image_url,
-                                        "read_status": "未読"
-                                    }
-                                    # 個別シートは名前でアクセス
-                                    if append_row_to_sheet(selected_individual_sheet_name, new_record, identifier_type="name"): # identifier_type="name" に変更
-                                        st.success(f"個別連絡を {selected_student_name} に送信しました！")
-                                        st.balloons()
-                                    else:
-                                        st.error("個別連絡の送信に失敗しました。")
+                                    st.error("個別連絡の送信に失敗しました。")
                 else:
                     if selected_student_name != "全体":
                         st.info("生徒の個別連絡シート名が見つからないため、個別連絡を作成できません。") # メッセージも変更
@@ -434,23 +443,24 @@ def main():
                                 with st.spinner("画像をGoogle Driveにアップロード中..."):
                                     uploaded_file.seek(0) # ファイルポインタを先頭に戻す
                                     image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
-                            if image_url is None:
-                                st.error("画像アップロードに失敗しました。再度お試しください。")
+                                if image_url is None: # upload_to_driveでエラーが発生した場合
+                                    st.error("画像アップロードに失敗しました。再度お試しください。")
+                                    st.stop() # ここで処理を中断
+                                    
+                            new_record = {
+                                "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
+                                "date": contact_date.strftime("%Y/%m/%d"),
+                                "sender": user_name,
+                                "message": school_message,
+                                "items_notice": items_notice,
+                                "image_url": image_url
+                            }
+                            # 全体連絡シートは名前でアクセス
+                            if append_row_to_sheet(GENERAL_CONTACTS_SHEET_NAME, new_record, identifier_type="name"):
+                                st.success("全体連絡を送信しました！")
+                                st.balloons()
                             else:
-                                new_record = {
-                                    "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
-                                    "date": contact_date.strftime("%Y/%m/%d"),
-                                    "sender": user_name,
-                                    "message": school_message,
-                                    "items_notice": items_notice,
-                                    "image_url": image_url
-                                }
-                                # 全体連絡シートは名前でアクセス
-                                if append_row_to_sheet(GENERAL_CONTACTS_SHEET_NAME, new_record, identifier_type="name"):
-                                    st.success("全体連絡を送信しました！")
-                                    st.balloons()
-                                else:
-                                    st.error("全体連絡の送信に失敗しました。")
+                                st.error("全体連絡の送信に失敗しました。")
 
             elif menu_selection == "連絡帳一覧":
                 st.header("連絡帳一覧と既読確認")
@@ -638,21 +648,22 @@ def main():
                                     with st.spinner("ファイルをGoogle Driveにアップロード中..."):
                                         event_attachment.seek(0) # ファイルポインタを先頭に戻す
                                         attachment_url = upload_to_drive(event_attachment, event_attachment.name, event_attachment.type, credentials)
-                                if attachment_url is None:
+                                if attachment_url is None: # upload_to_driveでエラーが発生した場合
                                     st.error("ファイルアップロードに失敗しました。")
+                                    st.stop() # ここで処理を中断
+                                    
+                                new_event = {
+                                    "event_date": event_date.strftime("%Y/%m/%d"),
+                                    "event_name": event_name,
+                                    "description": description,
+                                    "attachment_url": attachment_url
+                                }
+                                # 名前でアクセス
+                                if append_row_to_sheet(CALENDAR_SHEET_NAME, new_event, identifier_type="name"):
+                                    st.success("イベントを追加しました！")
+                                    st.rerun()
                                 else:
-                                    new_event = {
-                                        "event_date": event_date.strftime("%Y/%m/%d"),
-                                        "event_name": event_name,
-                                        "description": description,
-                                        "attachment_url": attachment_url
-                                    }
-                                    # 名前でアクセス
-                                    if append_row_to_sheet(CALENDAR_SHEET_NAME, new_event, identifier_type="name"):
-                                        st.success("イベントを追加しました！")
-                                        st.rerun()
-                                    else:
-                                        st.error("イベントの追加に失敗しました。")
+                                    st.error("イベントの追加に失敗しました。")
                 else:
                     st.info("カレンダーデータが読み込めませんでした。シート設定を確認してください。")
 
@@ -848,23 +859,24 @@ def main():
                                         with st.spinner("画像をGoogle Driveにアップロード中..."):
                                             uploaded_file_reply.seek(0) # ファイルポインタを先頭に戻す
                                             image_url_reply = upload_to_drive(uploaded_file_reply, uploaded_file_reply.name, uploaded_file_reply.type, credentials)
-                                    if image_url_reply is None:
+                                    if image_url_reply is None: # upload_to_driveでエラーが発生した場合
                                         st.error("画像アップロードに失敗しました。再度お試しください。")
-                                    else:
-                                        # timestampで確実に元の行を特定するため、df全体で検索
-                                        original_row_index = individual_df.index[individual_df['timestamp'] == latest_unreplied['timestamp']].tolist()[0]
-                                        sheet_row_index = original_row_index + 2 # スプレッドシートは1から始まり、ヘッダー行があるため+2
-                                        data_to_update = {"home_reply": home_reply}
-                                        if image_url_reply:
-                                            data_to_update["image_url"] = image_url_reply
+                                        st.stop() # ここで処理を中断
                                         
-                                        # シート名でアクセスするように変更
-                                        if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, data_to_update, identifier_type="name"): # identifier_type="name" に変更
-                                            st.success("返信を送信しました！")
-                                            st.balloons()
-                                            st.rerun()
-                                        else:
-                                            st.error("返信の保存に失敗しました。")
+                                    # timestampで確実に元の行を特定するため、df全体で検索
+                                    original_row_index = individual_df.index[individual_df['timestamp'] == latest_unreplied['timestamp']].tolist()[0]
+                                    sheet_row_index = original_row_index + 2 # スプレッドシートは1から始まり、ヘッダー行があるため+2
+                                    data_to_update = {"home_reply": home_reply}
+                                    if image_url_reply:
+                                        data_to_update["image_url"] = image_url_reply
+                                    
+                                    # シート名でアクセスするように変更
+                                    if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, data_to_update, identifier_type="name"): # identifier_type="name" に変更
+                                        st.success("返信を送信しました！")
+                                        st.balloons()
+                                        st.rerun()
+                                    else:
+                                        st.error("返信の保存に失敗しました。")
                     else:
                         st.info("返信する未返信の個別連絡はありません。")
                 else:
@@ -905,10 +917,9 @@ def main():
         st.markdown("- 画像付きで視覚的にわかりやすい連絡が可能")
         st.markdown("- 過去のやり取りを自動保存し、振り返りや支援記録にも活用可能")
         
-        # 例示用の画像。アプリの適切な画像に置き換えてください。
-        # st.image("https://raw.githubusercontent.com/streamlit/docs/main/docs/media/app_image_generation.png")
         # デジタル連絡帳のイメージ画像を生成します
         st.markdown("新しい教育ツールのイメージです。")
+        # デジタル連絡帳のイメージ画像を生成します
         
 if __name__ == "__main__":
     main()
