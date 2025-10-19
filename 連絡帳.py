@@ -47,9 +47,6 @@ if 'associated_students_data' not in st.session_state:
 # --- ヘルパー関数 ---
 def get_service_account_info():
     """Streamlit SecretsからGspreadサービスアカウント情報を取得"""
-    # デバッグ用に読み込まれた情報を表示してみる
-    # st.sidebar.write("Service Account Info Loaded:")
-    # st.sidebar.json(st.secrets["gspread_service_account"])
     return {
         "type": st.secrets["gspread_service_account"]["type"],
         "project_id": st.secrets["gspread_service_account"]["project_id"],
@@ -69,13 +66,11 @@ def get_gspread_client():
     """Gspreadクライアントを初期化（サービスアカウント認証）"""
     try:
         service_account_info = get_service_account_info()
-        # st.sidebar.write("Attempting gspread client initialization...")
         gc = gspread.service_account_from_dict(service_account_info)
-        # st.sidebar.success("gspreadクライアントが正常に初期化されました。")
         return gc
     except Exception as e:
         st.error(f"Gspreadクライアントの初期化に失敗しました: {e}")
-        st.exception(e) # Streamlitで詳細なスタックトレースを表示
+        # st.exception(e) # Streamlitで詳細なスタックトレースを表示すると表示崩れの原因になることがあるので、コメントアウト
         return None
 
 @st.cache_data(ttl=60)
@@ -86,8 +81,6 @@ def load_sheet_data(spreadsheet_id, worksheet_name="シート1"): # デフォル
         st.error("スプレッドシートの読み込みに失敗しました: Gspreadクライアントが利用できません。")
         return pd.DataFrame()
     try:
-        # デバッグのためにどのシートにアクセスしようとしているか表示
-        # st.sidebar.write(f"Accessing spreadsheet ID: {spreadsheet_id}")
         spreadsheet = gc.open_by_id(spreadsheet_id)
         worksheet = spreadsheet.worksheet(worksheet_name)
         data = worksheet.get_all_records()
@@ -98,7 +91,7 @@ def load_sheet_data(spreadsheet_id, worksheet_name="シート1"): # デフォル
         return pd.DataFrame()
     except Exception as e:
         st.error(f"スプレッドシートID '{spreadsheet_id}' の読み込み中にエラーが発生しました: {e}")
-        st.exception(e) # Streamlitで詳細なスタックトレースを表示
+        # st.exception(e) # 詳細エラー表示は一時的なデバッグに留め、本番運用ではコメントアウトが望ましい
         return pd.DataFrame()
 
 def append_row_to_sheet(spreadsheet_id, new_record, worksheet_name="シート1"):
@@ -116,7 +109,7 @@ def append_row_to_sheet(spreadsheet_id, new_record, worksheet_name="シート1")
         return True
     except Exception as e:
         st.error(f"スプレッドシートID '{spreadsheet_id}' へのデータ追加中にエラーが発生しました: {e}")
-        st.exception(e)
+        # st.exception(e)
         return False
 
 def update_row_in_sheet(spreadsheet_id, row_index, data_to_update, worksheet_name="シート1"):
@@ -136,7 +129,7 @@ def update_row_in_sheet(spreadsheet_id, row_index, data_to_update, worksheet_nam
         return True
     except Exception as e:
         st.error(f"スプレッドシートID '{spreadsheet_id}' の行更新中にエラーが発生しました: {e}")
-        st.exception(e)
+        # st.exception(e)
         return False
 
 def upload_to_drive(file_obj, file_name, mime_type, credentials):
@@ -171,7 +164,7 @@ def upload_to_drive(file_obj, file_name, mime_type, credentials):
         return web_view_link
     except Exception as e:
         st.error(f"Google Driveへのアップロード中にエラーが発生しました: {e}")
-        st.exception(e)
+        # st.exception(e)
         return None
 
 # --- Google OAuth認証関数 ---
@@ -185,7 +178,7 @@ def authenticate_google_oauth():
                 st.session_state.credentials = creds
             except Exception as e:
                 st.error(f"トークンのリフレッシュに失敗しました: {e}")
-                st.exception(e)
+                # st.exception(e)
                 st.session_state.credentials = None
                 creds = None
         
@@ -212,7 +205,6 @@ def authenticate_google_oauth():
 
             st.session_state.auth_url = auth_url
             
-            # 修正箇所: st.query_params を使用
             query_params = st.query_params
             if 'code' in query_params:
                 try:
@@ -221,17 +213,13 @@ def authenticate_google_oauth():
                     st.session_state.logged_in = True
                     st.success("ログインしました！")
                     
-                    # 修正箇所: st.query_params を使用してクエリパラメータをクリア
-                    # st.query_params は辞書のように扱えるため、キーを指定して削除
-                    del st.query_params['code'] # 'code' パラメータを削除
-                    # 他の不要なクエリパラメータも削除する場合は同様に行う
-                    # for param in list(st.query_params.keys()):
-                    #    del st.query_params[param]
+                    # 'code' パラメータを削除
+                    del st.query_params['code'] 
 
                     st.rerun()
                 except Exception as e:
                     st.error(f"認証コードの処理中にエラーが発生しました: {e}")
-                    st.exception(e)
+                    # st.exception(e)
                     st.session_state.logged_in = False
                     st.session_state.credentials = None
             else:
@@ -246,22 +234,26 @@ def authenticate_google_oauth():
             st.session_state.user_info = user_info
             
             # 教員・生徒データ読み込み
-            # ここでload_sheet_dataが失敗する可能性があるので、エラーハンドリングを強化
             teachers_df = load_sheet_data(TEACHERS_SHEET_ID)
             students_df = load_sheet_data(STUDENTS_SHEET_ID)
 
-            if teachers_df.empty or students_df.empty:
-                st.error("教師または生徒のスプレッドシートが読み込めませんでした。サービスアカウントの権限とシートIDを確認してください。")
+            # スプレッドシート読み込みが成功したかを確認
+            if teachers_df.empty:
+                st.error("教師リストのスプレッドシートが読み込めませんでした。サービスアカウントの権限、シートID、シート名（'シート1'）を確認してください。")
+                st.session_state.logged_in = False
+                st.stop()
+            if students_df.empty:
+                st.error("生徒リストのスプレッドシートが読み込めませんでした。サービスアカウントの権限、シートID、シート名（'シート1'）を確認してください。")
                 st.session_state.logged_in = False
                 st.stop()
 
+
             user_email = user_info['email']
             
-            if not teachers_df.empty and user_email in teachers_df['email'].tolist():
+            if user_email in teachers_df['email'].tolist():
                 st.session_state.user_role = 'teacher'
-                # 教員はすべての生徒の個別シートにアクセス可能
                 st.session_state.associated_students_data = students_df[['student_name', 'individual_sheet_id']].to_dict(orient='records')
-            elif not students_df.empty and user_email in students_df['parent_email'].tolist():
+            elif user_email in students_df['parent_email'].tolist():
                 st.session_state.user_role = 'parent'
                 st.session_state.associated_students_data = students_df[
                     students_df['parent_email'] == user_email
@@ -278,7 +270,7 @@ def authenticate_google_oauth():
                 
         except Exception as e:
             st.error(f"ユーザー情報の取得または役割判定中にエラーが発生しました: {e}")
-            st.exception(e)
+            # st.exception(e)
             st.session_state.logged_in = False
             st.session_state.credentials = None
             st.session_state.user_info = None
@@ -309,7 +301,6 @@ def main():
             st.session_state.user_info = None
             st.session_state.user_role = None
             st.session_state.associated_students_data = []
-            # 修正箇所: st.query_params を使用してクエリパラメータをクリア
             for param in list(st.query_params.keys()):
                 del st.query_params[param]
             st.rerun()
@@ -317,8 +308,6 @@ def main():
         st.sidebar.header("ナビゲーション")
 
         # --- 各種データの読み込み ---
-        # 教員リストと生徒リストは認証時に読み込まれるため、ここでは不要。
-        # 支援メモとカレンダーはここで読み込む
         support_memos_df = load_sheet_data(SUPPORT_MEMO_SHEET_ID)
         calendar_df = load_sheet_data(CALENDAR_SHEET_ID)
 
@@ -331,11 +320,9 @@ def main():
                 ["個別連絡作成", "全体連絡作成", "連絡帳一覧", "生徒別支援メモ", "カレンダー", "ダッシュボード"]
             )
             
-            # 生徒選択コンポーネント
             student_options = ["全体"] + student_names_only
             selected_student_name = st.sidebar.selectbox("対象生徒を選択", student_options, key="teacher_student_select")
             
-            # 選択された生徒の個別シートIDを特定
             selected_student_sheet_id = None
             if selected_student_name != "全体":
                 for student_data in associated_students_data:
@@ -343,15 +330,12 @@ def main():
                         selected_student_sheet_id = student_data['individual_sheet_id']
                         break
                 if selected_student_sheet_id is None:
-                    st.error(f"生徒 '{selected_student_name}' の個別連絡シートIDが見つかりません。")
-                    # st.stop() # ここでstopすると、シートIDがない場合に画面が真っ白になるため、ユーザー体験を考慮して削除
-                                # 代わりに、その後の処理で selected_student_sheet_id が None の場合のハンドリングを行う
-            
-            # ここから各メニューの処理（変更なし）
+                    st.error(f"生徒 '{selected_student_name}' の個別連絡シートIDが見つかりません。シート設定を確認してください。")
+
             if menu_selection == "個別連絡作成":
                 if selected_student_name == "全体":
                     st.warning("個別連絡作成では「全体」を選択できません。特定の生徒を選択してください。")
-                elif selected_student_sheet_id: # selected_student_sheet_id が None でないことを確認
+                elif selected_student_sheet_id:
                     st.header(f"個別連絡作成: {selected_student_name} 宛")
                     with st.form("individual_contact_form", clear_on_submit=True):
                         contact_date = st.date_input("連絡対象日付", datetime.now().date())
@@ -369,14 +353,14 @@ def main():
                                 if uploaded_file:
                                     with st.spinner("画像をGoogle Driveにアップロード中..."):
                                         image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
-                                if image_url is None: # upload_to_driveでエラーが発生した場合
+                                if image_url is None: 
                                     st.error("画像アップロードに失敗しました。再度お試しください。")
                                 else:
                                     new_record = {
                                         "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
                                         "date": contact_date.strftime("%Y/%m/%d"),
                                         "sender": user_name,
-                                        "message": school_message, # 'school_message' -> 'message' に変更
+                                        "message": school_message,
                                         "home_reply": "",
                                         "items_notice": items_notice,
                                         "remarks": remarks,
@@ -398,7 +382,7 @@ def main():
                 with st.form("general_contact_form", clear_on_submit=True):
                     contact_date = st.date_input("連絡対象日付", datetime.now().date())
                     school_message = st.text_area("全体への連絡内容", height=200, placeholder="全体へのお知らせや共有事項を入力してください。")
-                    items_notice = st.text_input("持ち物・特記事項", placeholder="全体への持ち物など、特記事項があれば入力してください。") # 全体連絡にも持ち物欄を追加
+                    items_notice = st.text_input("持ち物・特記事項", placeholder="全体への持ち物など、特記事項があれば入力してください。")
                     uploaded_file = st.file_uploader("画像を添付 (任意)", type=["png", "jpg", "jpeg", "gif", "pdf"])
 
                     submitted = st.form_submit_button("全体連絡を送信")
@@ -418,7 +402,7 @@ def main():
                                     "date": contact_date.strftime("%Y/%m/%d"),
                                     "sender": user_name,
                                     "message": school_message,
-                                    "items_notice": items_notice, # 全体連絡にも持ち物欄を追加
+                                    "items_notice": items_notice,
                                     "image_url": image_url
                                 }
                                 if append_row_to_sheet(GENERAL_CONTACTS_SHEET_ID, new_record):
@@ -430,7 +414,6 @@ def main():
             elif menu_selection == "連絡帳一覧":
                 st.header("連絡帳一覧と既読確認")
                 
-                # フィルタリング
                 filter_col1, filter_col2 = st.columns(2)
                 with filter_col1:
                     contact_type_filter = st.selectbox("連絡種別で絞り込み", ["すべて", "全体連絡", "個別連絡"])
@@ -439,7 +422,6 @@ def main():
 
                 search_query = st.text_input("キーワード検索", placeholder="連絡内容、備考などで検索...")
                 
-                # 全体連絡を表示
                 st.subheader("📢 全体連絡")
                 general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_ID)
                 if not general_df.empty:
@@ -472,7 +454,6 @@ def main():
                 else:
                     st.info("全体連絡データが読み込めませんでした。")
 
-                # 個別連絡を表示
                 st.subheader("🧑‍🏫 個別連絡")
                 if contact_type_filter in ["すべて", "個別連絡"]:
                     for student_data in associated_students_data:
@@ -484,7 +465,7 @@ def main():
                         if not individual_df.empty:
                             individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"])
                             if 'read_status' not in individual_df.columns:
-                                individual_df['read_status'] = '未読' # 新しい列を追加して既存データに対応
+                                individual_df['read_status'] = '未読'
                             individual_df = individual_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
 
                             display_individual_df = individual_df.copy()
@@ -499,7 +480,7 @@ def main():
                                 for index, row in display_individual_df.iterrows():
                                     with st.expander(f"📅 {row['date']} - {row['sender']} ({row['read_status']})", expanded=False):
                                         st.write(f"**送信日時:** {row['timestamp'].strftime('%Y/%m/%d %H:%M:%S')}")
-                                        st.info(f"**学校からの連絡:** {row['message']}") # 'school_message' -> 'message'
+                                        st.info(f"**学校からの連絡:** {row['message']}")
                                         if row['home_reply']:
                                             st.success(f"**家庭からの返信:** {row['home_reply']}")
                                         if row['items_notice']:
@@ -514,7 +495,6 @@ def main():
                                             else:
                                                 st.markdown(f"**添付ファイル:** [ファイルリンク]({row['image_url']})")
 
-                                        # 既読/未読ステータス更新機能 (教員のみ)
                                         current_read_status = row['read_status']
                                         new_read_status = st.radio(
                                             f"既読ステータスを更新 (生徒: {student_name}, ID: {index})",
@@ -625,11 +605,9 @@ def main():
             elif menu_selection == "ダッシュボード":
                 st.header("ダッシュボード")
                 
-                # 全体連絡のデータ
                 general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_ID)
                 general_contacts_count = len(general_df) if not general_df.empty else 0
 
-                # 個別連絡のデータ集計
                 total_individual_contacts = 0
                 total_read_individual = 0
                 total_unread_individual = 0
@@ -676,7 +654,6 @@ def main():
                 ["自分の連絡帳", "返信作成", "カレンダー"]
             )
             
-            # 保護者の場合、関連する生徒を選択
             if len(associated_students_data) > 1:
                 selected_student_name = st.sidebar.selectbox("お子さんを選択", student_names_only, key="parent_student_select")
             elif associated_students_data:
@@ -686,7 +663,6 @@ def main():
                 st.error("紐付けられた生徒情報がありません。")
                 st.stop()
 
-            # 選択された生徒の個別シートIDを特定
             selected_student_sheet_id = None
             if selected_student_name:
                 for student_data in associated_students_data:
@@ -694,14 +670,13 @@ def main():
                         selected_student_sheet_id = student_data['individual_sheet_id']
                         break
             if selected_student_sheet_id is None:
-                st.error(f"生徒 '{selected_student_name}' の個別連絡シートIDが見つかりません。")
+                st.error(f"生徒 '{selected_student_name}' の個別連絡シートIDが見つかりません。シート設定を確認してください。")
                 st.stop()
 
 
             if menu_selection == "自分の連絡帳":
                 st.header(f"{selected_student_name} 連絡帳")
                 
-                # 全体連絡を表示
                 st.subheader("📢 全体連絡")
                 general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_ID)
                 if not general_df.empty:
@@ -725,7 +700,6 @@ def main():
                 else:
                     st.info("全体連絡はまだありません。")
 
-                # 個別連絡を表示
                 st.subheader(f"🧑‍🏫 {selected_student_name} への個別連絡")
                 individual_df = load_sheet_data(selected_student_sheet_id)
                 if not individual_df.empty:
@@ -750,7 +724,6 @@ def main():
                                 else:
                                     st.markdown(f"**添付ファイル:** [ファイルリンク]({row['image_url']})")
                             
-                            # 保護者が閲覧した際に「既読」にするロジック
                             if row['read_status'] == '未読':
                                 if f"mark_read_{selected_student_name}_{index}" not in st.session_state:
                                     st.session_state[f"mark_read_{selected_student_name}_{index}"] = False
