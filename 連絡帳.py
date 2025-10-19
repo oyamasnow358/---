@@ -1,4 +1,5 @@
-# app.py
+# app.py (修正後の全体コード)
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
@@ -9,7 +10,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload # MediaIoBaseUpload を追加
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
 # --- Streamlit Secretsからの設定読み込み ---
 # .streamlit/secrets.toml に設定してください。
@@ -286,23 +287,31 @@ def authenticate_google_oauth():
                 teacher_row = teachers_df[teachers_df['email'] == user_email].iloc[0]
                 if TEACHER_CLASS_COLUMN in teacher_row:
                     # 複数のクラスを担当する場合に備え、カンマ区切りでリストに変換
-                    st.session_state.teacher_classes = [c.strip() for c in str(teacher_row[TEACHER_CLASS_COLUMN]).split(',')]
+                    st.session_state.teacher_classes = [c.strip() for c in str(teacher_row[TEACHER_CLASS_COLUMN]).split(',') if c.strip()] # 空の文字列を除外
                     st.sidebar.info(f"担当クラス: {', '.join(st.session_state.teacher_classes)}") # デバッグ表示
                 else:
                     st.warning(f"教師シートに '{TEACHER_CLASS_COLUMN}' 列が見つかりません。全生徒が表示されます。")
-                    st.session_state.teacher_classes = [] # 全クラス対象とする
+                    # 全ての生徒のクラスを収集し、重複を排除
+                    all_classes = students_df[STUDENT_CLASS_COLUMN].dropna().unique().tolist()
+                    st.session_state.teacher_classes = all_classes # 全クラス対象とする
 
                 # individual_sheet_name と class_name を生徒データに含める
                 if 'individual_sheet_name' in students_df.columns and STUDENT_CLASS_COLUMN in students_df.columns:
                     # NEW: 担当クラスの生徒のみに絞り込む
                     if st.session_state.teacher_classes:
-                        filtered_students_df = students_df[
-                            students_df[STUDENT_CLASS_COLUMN].isin(st.session_state.teacher_classes)
-                        ]
-                        st.session_state.associated_students_data = filtered_students_df[
-                            ['student_name', 'individual_sheet_name', STUDENT_CLASS_COLUMN]
-                        ].to_dict(orient='records')
-                    else: # 担当クラスが設定されていない場合は全生徒を表示
+                        # "全体"教師の場合、すべての生徒を取得
+                        if not st.session_state.teacher_classes: # teacher_classesが空の場合（全生徒対象）
+                             st.session_state.associated_students_data = students_df[
+                                ['student_name', 'individual_sheet_name', STUDENT_CLASS_COLUMN]
+                            ].to_dict(orient='records')
+                        else: # 特定のクラスを担当する教師の場合
+                            filtered_students_df = students_df[
+                                students_df[STUDENT_CLASS_COLUMN].isin(st.session_state.teacher_classes)
+                            ]
+                            st.session_state.associated_students_data = filtered_students_df[
+                                ['student_name', 'individual_sheet_name', STUDENT_CLASS_COLUMN]
+                            ].to_dict(orient='records')
+                    else: # 担当クラスが設定されていない場合は全生徒を表示（上記の処理でカバーされるはずだが念のため）
                         st.session_state.associated_students_data = students_df[
                             ['student_name', 'individual_sheet_name', STUDENT_CLASS_COLUMN]
                         ].to_dict(orient='records')
@@ -370,15 +379,15 @@ def main():
             st.session_state.associated_students_data = []
             st.session_state.teacher_classes = [] # NEW
             # Streamlitのクエリパラメータをクリアして再実行
-            st.experimental_set_query_params() # Streamlit 1.10.0以降
-            st.rerun()
+            st.experimental_set_query_params()
+            st.stop() # ここを st.rerun() から st.stop() に変更
 
         st.sidebar.header("ナビゲーション")
 
         # --- 各種データの読み込み ---
         # 支援メモとカレンダーはここで読み込む (シート名で指定)
         support_memos_df = load_sheet_data(SUPPORT_MEMO_SHEET_NAME, identifier_type="name")
-        calendar_df = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name")
+        calendar_df_full = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name") # カレンダーの全データを読み込む
 
 
         # --- 教員画面 ---
@@ -632,19 +641,40 @@ def main():
                     
             elif menu_selection == "カレンダー":
                 st.header("カレンダー (行事予定・配布物)")
-                calendar_df = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name") # 名前でアクセス
-                if not calendar_df.empty:
-                    calendar_df['event_date'] = pd.to_datetime(calendar_df['event_date'], errors='coerce')
-                    calendar_df = calendar_df.dropna(subset=['event_date'])
-                    calendar_df = calendar_df.sort_values(by='event_date')
+                
+                if not calendar_df_full.empty:
+                    calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], errors='coerce')
+                    calendar_df_full = calendar_df_full.dropna(subset=['event_date'])
+                    calendar_df_full = calendar_df_full.sort_values(by='event_date')
 
                     st.subheader("今後の予定")
+
+                    # 教員が担当クラスを持つ場合、そのクラスと「全体」のイベントをフィルタリング
+                    if st.session_state.teacher_classes:
+                        # 'target_classes'が空または'全体'を含む、または教師の担当クラスのいずれかを含むイベント
+                        display_events = calendar_df_full[
+                            calendar_df_full['target_classes'].apply(
+                                lambda x: not x or "全体" in [c.strip() for c in x.split(',')] or any(tc in [c.strip() for c in x.split(',')] for tc in st.session_state.teacher_classes)
+                            )
+                        ]
+                    else:
+                        # 担当クラスが設定されていない教員はすべてのイベントを見る（または'全体'のみ）
+                        # このケースは authenticate_google_oauth で teacher_classes に全クラスをセットするので発生しないはずだが念のため
+                        display_events = calendar_df_full[
+                            calendar_df_full['target_classes'].apply(
+                                lambda x: not x or "全体" in [c.strip() for c in x.split(',')]
+                            )
+                        ]
+
+
                     today = datetime.now().date()
-                    upcoming_events = calendar_df[calendar_df['event_date'].dt.date >= today]
+                    upcoming_events = display_events[display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
                         for index, event in upcoming_events.iterrows():
-                            st.markdown(f"**{event['event_date'].strftime('%Y/%m/%d')}**: **{event['event_name']}** - {event['description']}")
+                            # NEW: どのクラスのイベントかを表示
+                            target_classes_info = f" ({event['target_classes']})" if event['target_classes'] else ""
+                            st.markdown(f"**{event['event_date'].strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
                             if event['attachment_url']:
                                 st.markdown(f"添付資料: [こちら]({event['attachment_url']})")
                             st.markdown("---")
@@ -656,6 +686,17 @@ def main():
                         event_date = st.date_input("日付", datetime.now().date())
                         event_name = st.text_input("イベント名")
                         description = st.text_area("説明")
+                        
+                        # NEW: 対象クラス選択
+                        all_student_classes = load_sheet_data(STUDENTS_SHEET_NAME, identifier_type="name")[STUDENT_CLASS_COLUMN].dropna().unique().tolist()
+                        available_classes_for_teacher = ["全体"] + list(st.session_state.teacher_classes)
+                        
+                        selected_target_classes = st.multiselect(
+                            "対象クラス (複数選択可、'全体'を選択すると全クラス対象)",
+                            options=sorted(list(set(available_classes_for_teacher))), # 重複を削除しソート
+                            default=["全体"] if not st.session_state.teacher_classes else list(st.session_state.teacher_classes)
+                        )
+                        
                         event_attachment = st.file_uploader("添付ファイル (任意)", type=["pdf", "jpg", "png"])
                         
                         submitted_event = st.form_submit_button("イベントを追加")
@@ -676,7 +717,8 @@ def main():
                                     "event_date": event_date.strftime("%Y/%m/%d"),
                                     "event_name": event_name,
                                     "description": description,
-                                    "attachment_url": attachment_url
+                                    "attachment_url": attachment_url,
+                                    "target_classes": ", ".join(selected_target_classes) # NEW: 対象クラスをカンマ区切りで保存
                                 }
                                 # 名前でアクセス
                                 if append_row_to_sheet(CALENDAR_SHEET_NAME, new_event, identifier_type="name"):
@@ -754,6 +796,7 @@ def main():
                 for student_data in associated_students_data:
                     if student_data['student_name'] == selected_student_name:
                         selected_individual_sheet_name = student_data['individual_sheet_name']
+                        selected_student_class = student_data.get(STUDENT_CLASS_COLUMN) # 生徒のクラスも取得
                         break
             if selected_individual_sheet_name is None:
                 st.error(f"生徒 '{selected_student_name}' の個別連絡シート名が見つかりません。生徒情報シートを確認してください。") 
@@ -892,19 +935,30 @@ def main():
             
             elif menu_selection == "カレンダー":
                 st.header("カレンダー (行事予定・配布物)")
-                calendar_df = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name") # 名前でアクセス
-                if not calendar_df.empty:
-                    calendar_df['event_date'] = pd.to_datetime(calendar_df['event_date'], errors='coerce')
-                    calendar_df = calendar_df.dropna(subset=['event_date'])
-                    calendar_df = calendar_df.sort_values(by='event_date')
+                
+                if not calendar_df_full.empty:
+                    calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], errors='coerce')
+                    calendar_df_full = calendar_df_full.dropna(subset=['event_date'])
+                    calendar_df_full = calendar_df_full.sort_values(by='event_date')
 
                     st.subheader("今後の予定")
                     today = datetime.now().date()
-                    upcoming_events = calendar_df[calendar_df['event_date'].dt.date >= today]
+                    
+                    # 保護者の場合、自分の子どものクラスに関連するイベントと「全体」のイベントをフィルタリング
+                    # 'target_classes'が空または'全体'を含む、または保護者の子どものクラスを含むイベント
+                    parent_display_events = calendar_df_full[
+                        calendar_df_full['target_classes'].apply(
+                            lambda x: not x or "全体" in [c.strip() for c in x.split(',')] or (selected_student_class and selected_student_class in [c.strip() for c in x.split(',')])
+                        )
+                    ]
+
+                    upcoming_events = parent_display_events[parent_display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
                         for index, event in upcoming_events.iterrows():
-                            st.markdown(f"**{event['event_date'].strftime('%Y/%m/%d')}**: **{event['event_name']}** - {event['description']}")
+                            # NEW: どのクラスのイベントかを表示
+                            target_classes_info = f" ({event['target_classes']})" if event['target_classes'] else ""
+                            st.markdown(f"**{event['event_date'].strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
                             if event['attachment_url']:
                                 st.markdown(f"添付資料: [こちら]({event['attachment_url']})")
                             st.markdown("---")
