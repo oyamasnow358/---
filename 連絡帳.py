@@ -385,12 +385,19 @@ def main():
         support_memos_df = load_sheet_data(SUPPORT_MEMO_SHEET_NAME, identifier_type="name")
         calendar_df_full = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name") # カレンダーの全データを読み込む
         
-        # カレンダーデータフレームに'target_classes'列が存在するか確認し、なければ追加
-        if not calendar_df_full.empty and 'target_classes' not in calendar_df_full.columns:
-            calendar_df_full['target_classes'] = '' # デフォルト値を設定
-        elif calendar_df_full.empty:
-            # データフレームが空の場合は、列を作成して後でデータが追加されたときにエラーにならないようにする
+        # カレンダーデータフレームが空の場合に、必要な列を初期化
+        if calendar_df_full.empty:
             calendar_df_full = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
+        
+        # 'event_date'列をdatetime型に変換し、変換できないものはNaTにする
+        calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], errors='coerce')
+        # NaT（Not a Time）となった行を削除
+        calendar_df_full = calendar_df_full.dropna(subset=['event_date'])
+        
+        # 'target_classes'列が存在しない場合は追加し、NaNを空文字列に置換
+        if 'target_classes' not in calendar_df_full.columns:
+            calendar_df_full['target_classes'] = ''
+        calendar_df_full['target_classes'] = calendar_df_full['target_classes'].fillna('')
 
 
         # --- 教員画面 ---
@@ -655,24 +662,19 @@ def main():
             elif menu_selection == "カレンダー":
                 st.header("カレンダー (行事予定・配布物)")
                 
-                if not calendar_df_full.empty:
-                    calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], errors='coerce')
-                    calendar_df_full = calendar_df_full.dropna(subset=['event_date'])
-                    calendar_df_full = calendar_df_full.sort_values(by='event_date')
+                # calendar_df_full は main 関数の冒頭で既に適切に処理されていると仮定
 
+                if not calendar_df_full.empty:
                     st.subheader("今後の予定")
 
                     # 教員が担当クラスを持つ場合、そのクラスと「全体」のイベントをフィルタリング
-                    # 'target_classes'が空または'全体'を含む、または教師の担当クラスのいずれかを含むイベント
-                    # NEW: target_classesがNaNの場合は空文字列として扱う
                     display_events = calendar_df_full[
-                        calendar_df_full['target_classes'].fillna('').apply(
-                            lambda x: not x or "全体" in [c.strip() for c in x.split(',')] or any(tc in [c.strip() for c in x.split(',')] for tc in st.session_state.teacher_classes)
+                        calendar_df_full['target_classes'].apply(
+                            lambda x: "全体" in [c.strip() for c in x.split(',')] or any(tc in [c.strip() for c in x.split(',')] for tc in st.session_state.teacher_classes)
                         )
                     ]
 
                     today = datetime.now().date()
-                    # NEW: 日付比較はdatetimeオブジェクト全体ではなく、date部分で行う
                     upcoming_events = display_events[display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
@@ -974,24 +976,19 @@ def main():
             elif menu_selection == "カレンダー":
                 st.header("カレンダー (行事予定・配布物)")
                 
-                if not calendar_df_full.empty:
-                    calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], errors='coerce')
-                    calendar_df_full = calendar_df_full.dropna(subset=['event_date'])
-                    calendar_df_full = calendar_df_full.sort_values(by='event_date')
+                # calendar_df_full は main 関数の冒頭で既に適切に処理されていると仮定
 
+                if not calendar_df_full.empty:
                     st.subheader("今後の予定")
                     today = datetime.now().date()
                     
                     # 保護者の場合、自分の子どものクラスに関連するイベントと「全体」のイベントをフィルタリング
-                    # 'target_classes'が空または'全体'を含む、または保護者の子どものクラスを含むイベント
-                    # NEW: target_classesがNaNの場合は空文字列として扱う
                     parent_display_events = calendar_df_full[
-                        calendar_df_full['target_classes'].fillna('').apply(
-                            lambda x: not x or "全体" in [c.strip() for c in x.split(',')] or (selected_student_class and selected_student_class in [c.strip() for c in x.split(',')])
+                        calendar_df_full['target_classes'].apply(
+                            lambda x: "全体" in [c.strip() for c in x.split(',')] or (selected_student_class and selected_student_class in [c.strip() for c in x.split(',')])
                         )
                     ]
 
-                    # NEW: 日付比較はdatetimeオブジェクト全体ではなく、date部分で行う
                     upcoming_events = parent_display_events[parent_display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
