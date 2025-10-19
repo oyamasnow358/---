@@ -399,10 +399,18 @@ def main():
         if 'target_classes' not in calendar_df_full.columns:
             calendar_df_full['target_classes'] = '' # デフォルト値を設定
         
-        # event_date列を日付型に変換。エラーが出たらcoerceでNaNにする
-        calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], format='%Y/%m/%d', errors='coerce')
-        calendar_df_full = calendar_df_full.dropna(subset=['event_date']) # 無効な日付を持つ行を削除
-        calendar_df_full = calendar_df_full.sort_values(by='event_date')
+        # 【修正箇所1】event_date列を日付型に変換。エラーが出たらcoerceでNaNにする
+        # 既存の'event_date'列がない、または全てNaNになる可能性を考慮
+        if 'event_date' in calendar_df_full.columns:
+            calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], format='%Y/%m/%d', errors='coerce')
+            calendar_df_full = calendar_df_full.dropna(subset=['event_date']) # 無効な日付を持つ行を削除
+        else:
+            # 'event_date'列自体がない場合、空のDataFrameを維持
+            calendar_df_full = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
+
+        # 日付でソート（日付列が存在し、空でない場合のみ）
+        if not calendar_df_full.empty and 'event_date' in calendar_df_full.columns:
+            calendar_df_full = calendar_df_full.sort_values(by='event_date')
 
 
         # --- 教員画面 ---
@@ -668,11 +676,6 @@ def main():
                 st.header("カレンダー (行事予定・配布物)")
                 
                 if not calendar_df_full.empty:
-                    # calendar_df_fullのevent_dateはすでにmain関数の最初で処理済み
-                    # calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], format='%Y/%m/%d', errors='coerce')
-                    # calendar_df_full = calendar_df_full.dropna(subset=['event_date'])
-                    # calendar_df_full = calendar_df_full.sort_values(by='event_date')
-
                     st.subheader("今後の予定")
 
                     # 教員が担当クラスを持つ場合、そのクラスと「全体」のイベントをフィルタリング
@@ -689,10 +692,16 @@ def main():
                     upcoming_events = display_events[display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
+                        # 【修正箇所2】 event_dateがdatetime型であることを再度確認し、安全にstrftimeを呼び出す
                         for index, event in upcoming_events.iterrows():
+                            event_date_obj = event['event_date']
+                            if pd.isna(event_date_obj): # NaTの場合
+                                st.warning(f"カレンダーイベント '{event.get('event_name', '不明なイベント')}' に無効な日付が含まれています。")
+                                continue # このイベントはスキップ
+
                             # NEW: どのクラスのイベントかを表示
                             target_classes_info = f" ({event['target_classes']})" if event['target_classes'] else ""
-                            st.markdown(f"**{event['event_date'].strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
+                            st.markdown(f"**{event_date_obj.strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
                             if event['attachment_url']:
                                 st.markdown(f"添付資料: [こちら]({event['attachment_url']})")
                             st.markdown("---")
@@ -988,11 +997,6 @@ def main():
                 st.header("カレンダー (行事予定・配布物)")
                 
                 if not calendar_df_full.empty:
-                    # calendar_df_fullのevent_dateはすでにmain関数の最初で処理済み
-                    # calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], format='%Y/%m/%d', errors='coerce')
-                    # calendar_df_full = calendar_df_full.dropna(subset=['event_date'])
-                    # calendar_df_full = calendar_df_full.sort_values(by='event_date')
-
                     st.subheader("今後の予定")
                     today = datetime.now().date()
                     
@@ -1009,10 +1013,16 @@ def main():
                     upcoming_events = parent_display_events[parent_display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
+                        # 【修正箇所3】 event_dateがdatetime型であることを再度確認し、安全にstrftimeを呼び出す
                         for index, event in upcoming_events.iterrows():
+                            event_date_obj = event['event_date']
+                            if pd.isna(event_date_obj): # NaTの場合
+                                st.warning(f"カレンダーイベント '{event.get('event_name', '不明なイベント')}' に無効な日付が含まれています。")
+                                continue # このイベントはスキップ
+
                             # NEW: どのクラスのイベントかを表示
                             target_classes_info = f" ({event['target_classes']})" if event['target_classes'] else ""
-                            st.markdown(f"**{event['event_date'].strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
+                            st.markdown(f"**{event_date_obj.strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
                             if event['attachment_url']:
                                 st.markdown(f"添付資料: [こちら]({event['attachment_url']})")
                             st.markdown("---")
