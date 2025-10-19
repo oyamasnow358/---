@@ -32,6 +32,11 @@ SUPPORT_MEMO_SHEET_NAME = st.secrets["app_settings"]["support_memo_sheet_name"]
 CALENDAR_SHEET_NAME = st.secrets["app_settings"]["calendar_sheet_name"]
 DRIVE_FOLDER_ID = st.secrets["app_settings"]["drive_folder_id"]
 
+# NEW: 教師シートのクラス列名を設定
+TEACHER_CLASS_COLUMN = st.secrets["app_settings"]["teacher_class_column"] # 例: "class_name"
+# NEW: 生徒シートのクラス列名を設定
+STUDENT_CLASS_COLUMN = st.secrets["app_settings"]["student_class_column"] # 例: "class_name"
+
 # --- Streamlitセッション状態の初期化 ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -42,8 +47,10 @@ if 'user_info' not in st.session_state:
 if 'user_role' not in st.session_state:
     st.session_state.user_role = None # 'teacher' or 'parent'
 if 'associated_students_data' not in st.session_state:
-    # individual_sheet_id を individual_sheet_name に変更
-    st.session_state.associated_students_data = [] # {student_name: "", individual_sheet_name: ""}
+    st.session_state.associated_students_data = [] # {student_name: "", individual_sheet_name: "", class_name: ""}
+if 'teacher_classes' not in st.session_state: # NEW: 教員の担当クラスを格納
+    st.session_state.teacher_classes = []
+
 
 # --- ヘルパー関数 ---
 def get_service_account_info():
@@ -85,10 +92,10 @@ def load_sheet_data(identifier, identifier_type="id", worksheet_name="シート1
     try:
         if identifier_type == "id":
             spreadsheet = gc.open_by_id(identifier)
-            st.sidebar.info(f"IDでシートを開いています: {identifier}") # デバッグ用
+            # st.sidebar.info(f"IDでシートを開いています: {identifier}") # デバッグ用
         elif identifier_type == "name":
             spreadsheet = gc.open(identifier)
-            st.sidebar.info(f"名前でシートを開いています: {identifier}") # デバッグ用
+            # st.sidebar.info(f"名前でシートを開いています: {identifier}") # デバッグ用
         else:
             st.error("無効なidentifier_typeが指定されました。'id' または 'name' を使用してください。")
             return pd.DataFrame()
@@ -172,10 +179,7 @@ def upload_to_drive(file_obj, file_name, mime_type, credentials):
             'parents': [DRIVE_FOLDER_ID]
         }
         
-        # MediaFileUpload の代わりに MediaIoBaseUpload を使用
-        # Streamlitのfile_uploaderが返すUploadedFileオブジェクトは
-        # read()メソッドを持つファイルライクオブジェクトなので、MediaIoBaseUploadに直接渡せます。
-        media = MediaIoBaseUpload(
+        media = MediaIoBaseUpload( # MediaIoBaseUpload を使用
             file_obj, 
             mimetype=mime_type,
             resumable=True
@@ -248,8 +252,6 @@ def authenticate_google_oauth():
                     st.session_state.logged_in = True
                     st.success("ログインしました！")
                     
-                    # 認証コードをURLから削除して再実行
-                    # del st.query_params['code'] # この行は必要ない、または`st.experimental_rerun()`ではない
                     st.rerun() # クエリパラメータをクリアするために rerunning
                 except Exception as e:
                     st.error(f"認証コードの処理中にエラーが発生しました: {e}")
@@ -280,21 +282,44 @@ def authenticate_google_oauth():
             
             if not teachers_df.empty and user_email in teachers_df['email'].tolist():
                 st.session_state.user_role = 'teacher'
-                # individual_sheet_id を individual_sheet_name に変更
-                if 'individual_sheet_name' in students_df.columns:
-                    st.session_state.associated_students_data = students_df[['student_name', 'individual_sheet_name']].to_dict(orient='records')
+                # NEW: 教師の担当クラスを取得
+                teacher_row = teachers_df[teachers_df['email'] == user_email].iloc[0]
+                if TEACHER_CLASS_COLUMN in teacher_row:
+                    # 複数のクラスを担当する場合に備え、カンマ区切りでリストに変換
+                    st.session_state.teacher_classes = [c.strip() for c in str(teacher_row[TEACHER_CLASS_COLUMN]).split(',')]
+                    st.sidebar.info(f"担当クラス: {', '.join(st.session_state.teacher_classes)}") # デバッグ表示
                 else:
-                    st.error("生徒シートに 'individual_sheet_name' 列が見つかりません。")
+                    st.warning(f"教師シートに '{TEACHER_CLASS_COLUMN}' 列が見つかりません。全生徒が表示されます。")
+                    st.session_state.teacher_classes = [] # 全クラス対象とする
+
+                # individual_sheet_name と class_name を生徒データに含める
+                if 'individual_sheet_name' in students_df.columns and STUDENT_CLASS_COLUMN in students_df.columns:
+                    # NEW: 担当クラスの生徒のみに絞り込む
+                    if st.session_state.teacher_classes:
+                        filtered_students_df = students_df[
+                            students_df[STUDENT_CLASS_COLUMN].isin(st.session_state.teacher_classes)
+                        ]
+                        st.session_state.associated_students_data = filtered_students_df[
+                            ['student_name', 'individual_sheet_name', STUDENT_CLASS_COLUMN]
+                        ].to_dict(orient='records')
+                    else: # 担当クラスが設定されていない場合は全生徒を表示
+                        st.session_state.associated_students_data = students_df[
+                            ['student_name', 'individual_sheet_name', STUDENT_CLASS_COLUMN]
+                        ].to_dict(orient='records')
+                        
+                else:
+                    st.error(f"生徒シートに 'individual_sheet_name' または '{STUDENT_CLASS_COLUMN}' 列が見つかりません。")
                     st.session_state.logged_in = False
                     st.stop()
+
             elif not students_df.empty and user_email in students_df['parent_email'].tolist():
                 st.session_state.user_role = 'parent'
-                if 'individual_sheet_name' in students_df.columns:
+                if 'individual_sheet_name' in students_df.columns and STUDENT_CLASS_COLUMN in students_df.columns:
                     st.session_state.associated_students_data = students_df[
                         students_df['parent_email'] == user_email
-                    ][['student_name', 'individual_sheet_name']].to_dict(orient='records')
+                    ][['student_name', 'individual_sheet_name', STUDENT_CLASS_COLUMN]].to_dict(orient='records')
                 else:
-                    st.error("生徒シートに 'individual_sheet_name' 列が見つかりません。")
+                    st.error(f"生徒シートに 'individual_sheet_name' または '{STUDENT_CLASS_COLUMN}' 列が見つかりません。")
                     st.session_state.logged_in = False
                     st.stop()
                 
@@ -315,6 +340,7 @@ def authenticate_google_oauth():
             st.session_state.user_info = None
             st.session_state.user_role = None
             st.session_state.associated_students_data = []
+            st.session_state.teacher_classes = [] # NEW
             st.stop()
 
     return st.session_state.credentials if st.session_state.logged_in else None
@@ -330,6 +356,8 @@ def main():
     if st.session_state.logged_in and credentials:
         user_name = st.session_state.user_info.get('name', st.session_state.user_info['email'])
         user_role = st.session_state.user_role
+        
+        # NEW: ログインした教員・保護者に関連付けられた生徒データのみを使用
         associated_students_data = st.session_state.associated_students_data
         student_names_only = [s['student_name'] for s in associated_students_data]
 
@@ -340,6 +368,7 @@ def main():
             st.session_state.user_info = None
             st.session_state.user_role = None
             st.session_state.associated_students_data = []
+            st.session_state.teacher_classes = [] # NEW
             # Streamlitのクエリパラメータをクリアして再実行
             st.experimental_set_query_params() # Streamlit 1.10.0以降
             st.rerun()
@@ -360,6 +389,8 @@ def main():
                 ["個別連絡作成", "全体連絡作成", "連絡帳一覧", "生徒別支援メモ", "カレンダー", "ダッシュボード"]
             )
             
+            # NEW: 教員の場合は、自身の担当クラスの生徒と「全体」を選択肢として提示
+            # student_options のリスト生成はここで
             student_options = ["全体"] + student_names_only
             selected_student_name = st.sidebar.selectbox("対象生徒を選択", student_options, key="teacher_student_select")
             
@@ -394,15 +425,11 @@ def main():
                                 image_url = ""
                                 if uploaded_file:
                                     with st.spinner("画像をGoogle Driveにアップロード中..."):
-                                        # uploaded_file は Streamlit が提供する UploadedFile オブジェクトで、
-                                        # read(), seek() メソッドを持つファイルライクオブジェクトです。
-                                        # MediaIoBaseUpload に直接渡すために .seek(0) を行う
-                                        uploaded_file.seek(0) 
+                                        uploaded_file.seek(0) # ファイルポインタを先頭に戻す
                                         image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
                                     if image_url is None: # upload_to_driveでエラーが発生した場合
                                         st.error("画像アップロードに失敗しました。再度お試しください。")
-                                        # ここで処理を中断して、二重にエラーメッセージを出さないようにする
-                                        st.stop() # あるいは return
+                                        st.stop() # ここで処理を中断
                                         
                                 new_record = {
                                     "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
@@ -443,10 +470,10 @@ def main():
                                 with st.spinner("画像をGoogle Driveにアップロード中..."):
                                     uploaded_file.seek(0) # ファイルポインタを先頭に戻す
                                     image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
-                                if image_url is None: # upload_to_driveでエラーが発生した場合
-                                    st.error("画像アップロードに失敗しました。再度お試しください。")
-                                    st.stop() # ここで処理を中断
-                                    
+                            if image_url is None: # upload_to_driveでエラーが発生した場合
+                                st.error("画像アップロードに失敗しました。再度お試しください。")
+                                st.stop() # ここで処理を中断
+                                
                             new_record = {
                                 "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
                                 "date": contact_date.strftime("%Y/%m/%d"),
@@ -508,17 +535,15 @@ def main():
 
                 st.subheader("🧑‍🏫 個別連絡")
                 if contact_type_filter in ["すべて", "個別連絡"]:
-                    for student_data in associated_students_data:
+                    for student_data in associated_students_data: # NEW: ここはフィルタリングされた生徒データを使用
                         student_name = student_data['student_name']
-                        # individual_sheet_id から individual_sheet_name に変更
                         individual_sheet_name = student_data['individual_sheet_name']
 
                         st.markdown(f"##### {student_name} の連絡")
-                        # シート名でアクセスするように変更
-                        individual_df = load_sheet_data(individual_sheet_name, identifier_type="name") # identifier_type="name" に変更
+                        individual_df = load_sheet_data(individual_sheet_name, identifier_type="name")
                         if not individual_df.empty:
-                            individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') # エラー処理を追加
-                            individual_df = individual_df.dropna(subset=['timestamp']) # 無効なタイムスタンプを持つ行を削除
+                            individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
+                            individual_df = individual_df.dropna(subset=['timestamp']) 
                             if 'read_status' not in individual_df.columns:
                                 individual_df['read_status'] = '未読'
                             individual_df = individual_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
@@ -558,11 +583,9 @@ def main():
                                             key=f"read_status_radio_{student_name}_{index}"
                                         )
                                         if new_read_status != current_read_status:
-                                            # timestampで確実に元の行を特定するため、df全体で検索
                                             original_row_index = individual_df.index[individual_df['timestamp'] == row['timestamp']].tolist()[0]
-                                            sheet_row_index = original_row_index + 2 # スプレッドシートは1から始まり、ヘッダー行があるため+2
-                                            # シート名でアクセスするように変更
-                                            if update_row_in_sheet(individual_sheet_name, sheet_row_index, {"read_status": new_read_status}, identifier_type="name"): # identifier_type="name" に変更
+                                            sheet_row_index = original_row_index + 2 
+                                            if update_row_in_sheet(individual_sheet_name, sheet_row_index, {"read_status": new_read_status}, identifier_type="name"):
                                                 st.success(f"{student_name} の既読ステータスを '{new_read_status}' に更新しました。")
                                                 st.rerun()
                                             else:
@@ -580,7 +603,6 @@ def main():
                 if selected_student_name == "全体":
                     st.warning("「全体」の支援メモは作成できません。特定の生徒を選択してください。")
                 else:
-                    # 名前でアクセス
                     current_memo = support_memos_df[support_memos_df['student_name'] == selected_student_name]['memo_content'].iloc[0] if not support_memos_df.empty and selected_student_name in support_memos_df['student_name'].tolist() else ""
 
                     with st.form(key=f"support_memo_form_{selected_student_name}", clear_on_submit=False):
@@ -590,7 +612,6 @@ def main():
                         if submitted_memo:
                             if not support_memos_df.empty and selected_student_name in support_memos_df['student_name'].tolist():
                                 sheet_row_index = support_memos_df.index[support_memos_df['student_name'] == selected_student_name].tolist()[0] + 2
-                                # 名前でアクセス
                                 if update_row_in_sheet(SUPPORT_MEMO_SHEET_NAME, sheet_row_index, {"memo_content": new_memo_content, "last_updated": datetime.now().strftime("%Y/%m/%d %H:%M:%S")}, identifier_type="name"):
                                     st.success("支援メモを更新しました。")
                                 else:
@@ -602,7 +623,6 @@ def main():
                                     "created_at": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
                                     "last_updated": datetime.now().strftime("%Y/%m/%d %H:%M:%S")
                                 }
-                                # 名前でアクセス
                                 if append_row_to_sheet(SUPPORT_MEMO_SHEET_NAME, new_memo_record, identifier_type="name"):
                                     st.success("支援メモを保存しました。")
                                 else:
@@ -678,11 +698,9 @@ def main():
                 total_unread_individual = 0
                 total_replied_individual = 0
 
-                for student_data in associated_students_data:
-                    # individual_sheet_id から individual_sheet_name に変更
+                for student_data in associated_students_data: # NEW: フィルタリングされた生徒データを使用
                     individual_sheet_name = student_data['individual_sheet_name']
-                    # シート名でアクセスするように変更
-                    individual_df = load_sheet_data(individual_sheet_name, identifier_type="name") # identifier_type="name" に変更
+                    individual_df = load_sheet_data(individual_sheet_name, identifier_type="name")
                     if not individual_df.empty:
                         total_individual_contacts += len(individual_df)
                         if 'read_status' in individual_df.columns:
@@ -699,17 +717,15 @@ def main():
 
                 st.subheader("月別連絡数 (個別連絡)")
                 all_individual_contacts_df = pd.DataFrame()
-                for student_data in associated_students_data:
-                    # individual_sheet_id から individual_sheet_name に変更
+                for student_data in associated_students_data: # NEW: フィルタリングされた生徒データを使用
                     individual_sheet_name = student_data['individual_sheet_name']
-                    # シート名でアクセスするように変更
-                    individual_df = load_sheet_data(individual_sheet_name, identifier_type="name") # identifier_type="name" に変更
+                    individual_df = load_sheet_data(individual_sheet_name, identifier_type="name")
                     if not individual_df.empty:
                         all_individual_contacts_df = pd.concat([all_individual_contacts_df, individual_df])
                 
                 if not all_individual_contacts_df.empty:
-                    all_individual_contacts_df["timestamp"] = pd.to_datetime(all_individual_contacts_df["timestamp"], errors='coerce') # エラー処理を追加
-                    all_individual_contacts_df = all_individual_contacts_df.dropna(subset=['timestamp']) # 無効なタイムスタンプを持つ行を削除
+                    all_individual_contacts_df["timestamp"] = pd.to_datetime(all_individual_contacts_df["timestamp"], errors='coerce') 
+                    all_individual_contacts_df = all_individual_contacts_df.dropna(subset=['timestamp']) 
                     all_individual_contacts_df["month"] = all_individual_contacts_df["timestamp"].dt.to_period("M")
                     monthly_counts = all_individual_contacts_df["month"].value_counts().sort_index()
                     st.bar_chart(monthly_counts)
@@ -733,7 +749,6 @@ def main():
                 st.error("紐付けられた生徒情報がありません。")
                 st.stop()
 
-            # individual_sheet_id から individual_sheet_name に変更
             selected_individual_sheet_name = None 
             if selected_student_name:
                 for student_data in associated_students_data:
@@ -741,7 +756,7 @@ def main():
                         selected_individual_sheet_name = student_data['individual_sheet_name']
                         break
             if selected_individual_sheet_name is None:
-                st.error(f"生徒 '{selected_student_name}' の個別連絡シート名が見つかりません。生徒情報シートを確認してください。") # メッセージも変更
+                st.error(f"生徒 '{selected_student_name}' の個別連絡シート名が見つかりません。生徒情報シートを確認してください。") 
                 st.stop()
 
 
@@ -751,8 +766,8 @@ def main():
                 st.subheader("📢 全体連絡")
                 general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name") # 名前でアクセス
                 if not general_df.empty:
-                    general_df["timestamp"] = pd.to_datetime(general_df["timestamp"], errors='coerce') # エラー処理を追加
-                    general_df = general_df.dropna(subset=['timestamp']) # 無効なタイムスタンプを持つ行を削除
+                    general_df["timestamp"] = pd.to_datetime(general_df["timestamp"], errors='coerce') 
+                    general_df = general_df.dropna(subset=['timestamp']) 
                     general_df = general_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
                     
                     for index, row in general_df.iterrows():
@@ -773,11 +788,10 @@ def main():
                     st.info("全体連絡はまだありません。")
 
                 st.subheader(f"🧑‍🏫 {selected_student_name} への個別連絡")
-                # シート名でアクセスするように変更
-                individual_df = load_sheet_data(selected_individual_sheet_name, identifier_type="name") # identifier_type="name" に変更
+                individual_df = load_sheet_data(selected_individual_sheet_name, identifier_type="name") 
                 if not individual_df.empty:
-                    individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') # エラー処理を追加
-                    individual_df = individual_df.dropna(subset=['timestamp']) # 無効なタイムスタンプを持つ行を削除
+                    individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
+                    individual_df = individual_df.dropna(subset=['timestamp']) 
                     if 'read_status' not in individual_df.columns:
                         individual_df['read_status'] = '未読'
                     individual_df = individual_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
@@ -805,11 +819,9 @@ def main():
                                 if not st.session_state[f"mark_read_{selected_student_name}_{index}"]:
                                     st.info("この連絡はまだ既読になっていません。")
                                     if st.button("既読にする", key=f"read_button_{selected_student_name}_{index}"):
-                                        # timestampで確実に元の行を特定するため、df全体で検索
                                         original_row_index = individual_df.index[individual_df['timestamp'] == row['timestamp']].tolist()[0]
-                                        sheet_row_index = original_row_index + 2 # スプレッドシートは1から始まり、ヘッダー行があるため+2
-                                        # シート名でアクセスするように変更
-                                        if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, {"read_status": "既読"}, identifier_type="name"): # identifier_type="name" に変更
+                                        sheet_row_index = original_row_index + 2 
+                                        if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, {"read_status": "既読"}, identifier_type="name"): 
                                             st.session_state[f"mark_read_{selected_student_name}_{index}"] = True
                                             st.success("連絡を既読にしました。")
                                             st.rerun()
@@ -823,18 +835,16 @@ def main():
                 st.header(f"{selected_student_name} からの返信作成")
                 st.info("返信したい個別連絡を選択してください。")
 
-                # シート名でアクセスするように変更
-                individual_df = load_sheet_data(selected_individual_sheet_name, identifier_type="name") # identifier_type="name" に変更
+                individual_df = load_sheet_data(selected_individual_sheet_name, identifier_type="name") 
                 if not individual_df.empty:
-                    individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') # エラー処理を追加
-                    individual_df = individual_df.dropna(subset=['timestamp']) # 無効なタイムスタンプを持つ行を削除
+                    individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
+                    individual_df = individual_df.dropna(subset=['timestamp']) 
                     
                     reply_needed_df = individual_df[
                         (individual_df["home_reply"].astype(str).str.strip() == "")
                     ]
 
                     if not reply_needed_df.empty:
-                        # 最新の未返信連絡を取得
                         latest_unreplied = reply_needed_df.sort_values(by="timestamp", ascending=False).iloc[0]
                         
                         st.subheader(f"返信対象連絡: {latest_unreplied['date']} の学校からの連絡")
@@ -857,21 +867,19 @@ def main():
                                     image_url_reply = ""
                                     if uploaded_file_reply:
                                         with st.spinner("画像をGoogle Driveにアップロード中..."):
-                                            uploaded_file_reply.seek(0) # ファイルポインタを先頭に戻す
+                                            uploaded_file_reply.seek(0) 
                                             image_url_reply = upload_to_drive(uploaded_file_reply, uploaded_file_reply.name, uploaded_file_reply.type, credentials)
-                                    if image_url_reply is None: # upload_to_driveでエラーが発生した場合
+                                    if image_url_reply is None: 
                                         st.error("画像アップロードに失敗しました。再度お試しください。")
-                                        st.stop() # ここで処理を中断
+                                        st.stop() 
                                         
-                                    # timestampで確実に元の行を特定するため、df全体で検索
                                     original_row_index = individual_df.index[individual_df['timestamp'] == latest_unreplied['timestamp']].tolist()[0]
-                                    sheet_row_index = original_row_index + 2 # スプレッドシートは1から始まり、ヘッダー行があるため+2
+                                    sheet_row_index = original_row_index + 2 
                                     data_to_update = {"home_reply": home_reply}
                                     if image_url_reply:
                                         data_to_update["image_url"] = image_url_reply
                                     
-                                    # シート名でアクセスするように変更
-                                    if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, data_to_update, identifier_type="name"): # identifier_type="name" に変更
+                                    if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, data_to_update, identifier_type="name"):
                                         st.success("返信を送信しました！")
                                         st.balloons()
                                         st.rerun()
@@ -917,9 +925,7 @@ def main():
         st.markdown("- 画像付きで視覚的にわかりやすい連絡が可能")
         st.markdown("- 過去のやり取りを自動保存し、振り返りや支援記録にも活用可能")
         
-        # デジタル連絡帳のイメージ画像を生成します
         st.markdown("新しい教育ツールのイメージです。")
-        # デジタル連絡帳のイメージ画像を生成します
         
 if __name__ == "__main__":
     main()
