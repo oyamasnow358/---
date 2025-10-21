@@ -52,10 +52,6 @@ if 'associated_students_data' not in st.session_state:
     st.session_state.associated_students_data = [] # {student_name: "", individual_sheet_name: "", class_name: ""}
 if 'teacher_classes' not in st.session_state: # NEW: 教員の担当クラスを格納
     st.session_state.teacher_classes = []
-# NEW: 既読ボタンのクリック状態を管理するセッションステートを追加
-if 'read_button_clicked' not in st.session_state:
-    st.session_state.read_button_clicked = {}
-
 
 # --- ヘルパー関数 ---
 def get_service_account_info():
@@ -86,16 +82,13 @@ def get_gspread_client():
         st.exception(e) # 詳細なエラー情報を表示
         return None
 
-# load_sheet_data関数をIDと名前の両方に対応できるように修正
-# NEW: TTLを短くしすぎないように注意。デフォルトで60秒なので、短時間で複数回読み込む必要がある場合は適宜調整。
-# エラー回避のため、キャッシュのクリアは明示的に行う箇所を減らします。
-@st.cache_data(ttl=300) # 5分間に変更 (シートデータが頻繁に更新されないと仮定)
-def load_sheet_data(identifier, identifier_type="id", worksheet_name="シート1"):
-    """Googleスプレッドシートから指定シートのデータを読み込む (IDまたは名前で指定)"""
+# NEW: スプレッドシートオブジェクト自体をキャッシュする関数
+@st.cache_resource(ttl=600) # スプレッドシートオブジェクトは比較的変更が少ないので長めにキャッシュ
+def open_spreadsheet_by_identifier(identifier, identifier_type="id"):
+    """GoogleスプレッドシートをIDまたは名前で開き、スプレッドシートオブジェクトを返す"""
     gc = get_gspread_client()
     if gc is None:
-        st.error(f"スプレッドシート '{identifier}' の読み込みに失敗しました: Gspreadクライアントが利用できません。")
-        return pd.DataFrame()
+        return None
     try:
         if identifier_type == "id":
             spreadsheet = gc.open_by_id(identifier)
@@ -103,8 +96,27 @@ def load_sheet_data(identifier, identifier_type="id", worksheet_name="シート1
             spreadsheet = gc.open(identifier)
         else:
             st.error("無効なidentifier_typeが指定されました。'id' または 'name' を使用してください。")
-            return pd.DataFrame()
+            return None
+        return spreadsheet
+    except gspread.exceptions.SpreadsheetNotFound:
+        st.error(f"スプレッドシート '{identifier}' が見つかりませんでした。名前またはIDを確認してください。サービスアカウントに権限があるか確認してください。")
+        return None
+    except gspread.exceptions.APIError as e:
+        st.error(f"Google Sheets APIエラー: スプレッドシート '{identifier}' へのアクセス中に問題が発生しました。短時間でのリクエストが多すぎる可能性があります（Quota Exceeded）。しばらく待ってから再試行してください。詳細: {e}")
+        return None
+    except Exception as e:
+        st.error(f"スプレッドシート '{identifier}' のオープン中にエラーが発生しました: {e}")
+        st.exception(e)
+        return None
 
+# load_sheet_data関数を修正: open_spreadsheet_by_identifier を利用
+@st.cache_data(ttl=60) # データ自体は60秒キャッシュ
+def load_sheet_data(identifier, identifier_type="id", worksheet_name="シート1"):
+    """Googleスプレッドシートから指定シートのデータを読み込む (IDまたは名前で指定)"""
+    spreadsheet = open_spreadsheet_by_identifier(identifier, identifier_type)
+    if spreadsheet is None:
+        return pd.DataFrame()
+    try:
         worksheet = spreadsheet.worksheet(worksheet_name)
         data = worksheet.get_all_records()
         df = pd.DataFrame(data)
@@ -112,70 +124,53 @@ def load_sheet_data(identifier, identifier_type="id", worksheet_name="シート1
     except gspread.exceptions.WorksheetNotFound:
         st.warning(f"スプレッドシート '{identifier}' 内のシート '{worksheet_name}' が見つかりません。シート名を確認してください。")
         return pd.DataFrame()
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.warning(f"スプレッドシート '{identifier}' が見つかりませんでした。名前またはIDを確認してください。サービスアカウントに権限があるか確認してください。")
+    except gspread.exceptions.APIError as e:
+        st.error(f"Google Sheets APIエラー: スプレッドシート '{identifier}' のワークシート '{worksheet_name}' 読み込み中に問題が発生しました。短時間でのリクエストが多すぎる可能性があります（Quota Exceeded）。しばらく待ってから再試行してください。詳細: {e}")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"スプレッドシート '{identifier}' の読み込み中にエラーが発生しました: {e}")
         st.exception(e)
         return pd.DataFrame()
 
-# append_row_to_sheet関数をIDと名前の両方に対応できるように修正
+# append_row_to_sheet関数を修正: open_spreadsheet_by_identifier を利用
 def append_row_to_sheet(identifier, new_record, identifier_type="id", worksheet_name="シート1"):
     """Googleスプレッドシートにデータを追加する (IDまたは名前で指定)"""
-    gc = get_gspread_client()
-    if gc is None:
+    spreadsheet = open_spreadsheet_by_identifier(identifier, identifier_type)
+    if spreadsheet is None:
         return False
     try:
-        if identifier_type == "id":
-            spreadsheet = gc.open_by_id(identifier)
-        elif identifier_type == "name":
-            spreadsheet = gc.open(identifier)
-        else:
-            st.error("無効なidentifier_typeが指定されました。'id' または 'name' を使用してください。")
-            return False
-
         worksheet = spreadsheet.worksheet(worksheet_name)
         header = worksheet.row_values(1)
         ordered_record = [new_record.get(col, '') for col in header]
         worksheet.append_row(ordered_record)
-        # NEW: データ追加時は関連するキャッシュのみクリア
-        st.cache_data.clear(hash_funcs={load_sheet_data: lambda _identifier, _type, _ws_name: (_identifier, _type, _ws_name)})
-        # 具体的なシートのキャッシュをクリアする関数を定義 (load_sheet_dataのハッシュ関数と合わせる)
-        # gc.open(identifier)のキャッシュはクリアされないため、シート全体を再取得する
-        # より良いのは、特定のシートのデータだけをクリアするカスタムキャッシュを実装することですが、
-        # ここでは一番影響の大きい load_sheet_data のキャッシュをクリアします
-        st.cache_data.clear() # 全てのcache_dataをクリアすることで確実性を高めます。
+        st.cache_data.clear() # キャッシュをクリアして最新データを再読み込み
         return True
+    except gspread.exceptions.APIError as e:
+        st.error(f"Google Sheets APIエラー: スプレッドシート '{identifier}' へのデータ追加中に問題が発生しました。短時間でのリクエストが多すぎる可能性があります（Quota Exceeded）。しばらく待ってから再試行してください。詳細: {e}")
+        return False
     except Exception as e:
         st.error(f"スプレッドシート '{identifier}' へのデータ追加中にエラーが発生しました: {e}")
         st.exception(e)
         return False
 
-# update_row_in_sheet関数をIDと名前の両方に対応できるように修正
+# update_row_in_sheet関数を修正: open_spreadsheet_by_identifier を利用 (今回は既読機能削除のため使用しないが残しておく)
 def update_row_in_sheet(identifier, row_index, data_to_update, identifier_type="id", worksheet_name="シート1"):
     """Googleスプレッドシートの指定行を更新する (IDまたは名前で指定)"""
-    gc = get_gspread_client()
-    if gc is None:
+    spreadsheet = open_spreadsheet_by_identifier(identifier, identifier_type)
+    if spreadsheet is None:
         return False
     try:
-        if identifier_type == "id":
-            spreadsheet = gc.open_by_id(identifier)
-        elif identifier_type == "name":
-            spreadsheet = gc.open(identifier)
-        else:
-            st.error("無効なidentifier_typeが指定されました。'id' または 'name' を使用してください。")
-            return False
-
         worksheet = spreadsheet.worksheet(worksheet_name)
         header = worksheet.row_values(1)
         for col_name, value in data_to_update.items():
             if col_name in header:
                 col_index = header.index(col_name) + 1 # gspreadは1-indexed
                 worksheet.update_cell(row_index, col_index, value)
-        # NEW: データ更新時は関連するキャッシュのみクリア
-        st.cache_data.clear() # 全てのcache_dataをクリアすることで確実性を高めます。
+        st.cache_data.clear()
         return True
+    except gspread.exceptions.APIError as e:
+        st.error(f"Google Sheets APIエラー: スプレッドシート '{identifier}' の行更新中に問題が発生しました。短時間でのリクエストが多すぎる可能性があります（Quota Exceeded）。しばらく待ってから再試行してください。詳細: {e}")
+        return False
     except Exception as e:
         st.error(f"スプレッドシート '{identifier}' の行更新中にエラーが発生しました: {e}")
         st.exception(e)
@@ -285,7 +280,8 @@ def authenticate_google_oauth():
             st.session_state.user_info = user_info
             
             # 教員・生徒データ読み込み (シート名で指定)
-            # NEW: ログイン時にのみこれらのデータを読み込む
+            # ここでのシート読み込みもAPIリクエストを消費するので注意
+            # ただし、ログイン時に一度だけ呼び出されるため、頻度は低い
             teachers_df = load_sheet_data(TEACHERS_SHEET_NAME, identifier_type="name")
             students_df = load_sheet_data(STUDENTS_SHEET_NAME, identifier_type="name")
 
@@ -389,13 +385,40 @@ def main():
             st.session_state.user_role = None
             st.session_state.associated_students_data = []
             st.session_state.teacher_classes = [] # NEW
-            st.session_state.read_button_clicked = {} # NEW: 既読ボタンの状態もリセット
             # Streamlitのクエリパラメータをクリアして再実行
             st.experimental_set_query_params()
-            st.rerun() # ログアウト時は確実なページ遷移のため reruning に変更
-            # st.stop() はこの場合、ページの状態が完全にリセットされない可能性があるため、rerunが適切
+            st.rerun() # ログアウト時はrerunで状態をリセット
+            # st.stop() # ここを st.rerun() に戻す。stop()だとページが完全に停止してしまうため。
 
         st.sidebar.header("ナビゲーション")
+
+        # --- 各種データの読み込み ---
+        # 支援メモとカレンダーはここで読み込む (シート名で指定)
+        # これらのデータはセッション内でキャッシュされるため、頻繁な呼び出しは避ける
+        support_memos_df = load_sheet_data(SUPPORT_MEMO_SHEET_NAME, identifier_type="name")
+        calendar_df_full = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name") # カレンダーの全データを読み込む
+        
+        # カレンダーデータフレームが空の場合、後続処理でKeyErrorとならないよう空のDFのスキーマを定義
+        if calendar_df_full.empty:
+            st.warning("カレンダーデータが読み込めませんでした。シート名または権限を確認してください。")
+            # 空のDataFrameだが、必要な列を持つようにしておく
+            calendar_df_full = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
+        
+        # カレンダーデータフレームに'target_classes'列が存在するか確認し、なければ追加
+        if 'target_classes' not in calendar_df_full.columns:
+            calendar_df_full['target_classes'] = '' # デフォルト値を設定
+        
+        # event_date列を日付型に変換。エラーが出たらcoerceでNaNにする
+        if 'event_date' in calendar_df_full.columns:
+            calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], format='%Y/%m/%d', errors='coerce')
+            calendar_df_full = calendar_df_full.dropna(subset=['event_date']) # 無効な日付を持つ行を削除
+        else:
+            calendar_df_full = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
+
+        # 日付でソート（日付列が存在し、空でない場合のみ）
+        if not calendar_df_full.empty and 'event_date' in calendar_df_full.columns:
+            calendar_df_full = calendar_df_full.sort_values(by='event_date')
+
 
         # --- 教員画面 ---
         if user_role == 'teacher':
@@ -406,11 +429,9 @@ def main():
             )
             
             # NEW: 教員の場合は、自身の担当クラスの生徒と「全体」を選択肢として提示
-            # student_options のリスト生成はここで
             student_options = ["全体"] + student_names_only
             selected_student_name = st.sidebar.selectbox("対象生徒を選択", student_options, key="teacher_student_select")
             
-            # individual_sheet_id の代わりに individual_sheet_name を使用
             selected_individual_sheet_name = None 
             if selected_student_name != "全体":
                 for student_data in associated_students_data:
@@ -420,35 +441,11 @@ def main():
                 if selected_individual_sheet_name is None:
                     st.error(f"生徒 '{selected_student_name}' の個別連絡シート名が見つかりません。生徒情報シートを確認してください。")
             
-            # --- 各種データの読み込み ---
-            # NEW: 必要なメニュー選択時のみデータを読み込む
-            support_memos_df = pd.DataFrame()
-            calendar_df_full = pd.DataFrame()
-            if menu_selection == "生徒別支援メモ":
-                support_memos_df = load_sheet_data(SUPPORT_MEMO_SHEET_NAME, identifier_type="name")
-            if menu_selection == "カレンダー":
-                calendar_df_full = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name")
-                # カレンダーデータフレームが空の場合、後続処理でKeyErrorとならないよう空のDFのスキーマを定義
-                if calendar_df_full.empty:
-                    st.warning("カレンダーデータが読み込めませんでした。シート名または権限を確認してください。")
-                    calendar_df_full = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
-                
-                if 'target_classes' not in calendar_df_full.columns:
-                    calendar_df_full['target_classes'] = '' # デフォルト値を設定
-                
-                if 'event_date' in calendar_df_full.columns:
-                    calendar_df_full['event_date'] = pd.to_datetime(calendar_df_full['event_date'], format='%Y/%m/%d', errors='coerce')
-                    calendar_df_full = calendar_df_full.dropna(subset=['event_date']) 
-                else:
-                    calendar_df_full = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
-
-                if not calendar_df_full.empty and 'event_date' in calendar_df_full.columns:
-                    calendar_df_full = calendar_df_full.sort_values(by='event_date')
 
             if menu_selection == "個別連絡作成":
                 if selected_student_name == "全体":
                     st.warning("個別連絡作成では「全体」を選択できません。特定の生徒を選択してください。")
-                elif selected_individual_sheet_name: 
+                elif selected_individual_sheet_name:
                     st.header(f"個別連絡作成: {selected_student_name} 宛")
                     with st.form("individual_contact_form", clear_on_submit=True):
                         contact_date = st.date_input("連絡対象日付", datetime.now().date())
@@ -465,12 +462,12 @@ def main():
                                 image_url = ""
                                 if uploaded_file:
                                     with st.spinner("画像をGoogle Driveにアップロード中..."):
-                                        uploaded_file.seek(0) 
+                                        uploaded_file.seek(0)
                                         image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
-                                    if image_url is None: 
+                                    if image_url is None:
                                         st.error("画像アップロードに失敗しました。再度お試しください。")
-                                        # NEW: st.stop() の代わりに return を使用して処理を中断
-                                        return 
+                                        # st.stop() は使わず、エラーメッセージを出して処理を継続させるか、return
+                                        return
                                         
                                 new_record = {
                                     "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
@@ -481,17 +478,17 @@ def main():
                                     "items_notice": items_notice,
                                     "remarks": remarks,
                                     "image_url": image_url,
-                                    "read_status": "未読" # NEW: read_statusを最初から設定
+                                    # "read_status": "未読" # 既読機能削除に伴い削除
                                 }
                                 if append_row_to_sheet(selected_individual_sheet_name, new_record, identifier_type="name"):
                                     st.success(f"個別連絡を {selected_student_name} に送信しました！")
                                     st.balloons()
-                                    st.rerun() # 送信後、表示を更新するためにrerun
+                                    st.rerun() # 成功時にリロード
                                 else:
                                     st.error("個別連絡の送信に失敗しました。")
                 else:
                     if selected_student_name != "全体":
-                        st.info("生徒の個別連絡シート名が見つからないため、個別連絡を作成できません。") 
+                        st.info("生徒の個別連絡シート名が見つからないため、個別連絡を作成できません。")
 
             elif menu_selection == "全体連絡作成":
                 st.header("全体連絡作成")
@@ -509,11 +506,11 @@ def main():
                             image_url = ""
                             if uploaded_file:
                                 with st.spinner("画像をGoogle Driveにアップロード中..."):
-                                    uploaded_file.seek(0) 
+                                    uploaded_file.seek(0)
                                     image_url = upload_to_drive(uploaded_file, uploaded_file.name, uploaded_file.type, credentials)
-                            if image_url is None: 
+                            if image_url is None:
                                 st.error("画像アップロードに失敗しました。再度お試しください。")
-                                return 
+                                return
                                 
                             new_record = {
                                 "timestamp": datetime.now().strftime("%Y/%m/%d %H:%M:%S"),
@@ -526,37 +523,42 @@ def main():
                             if append_row_to_sheet(GENERAL_CONTACTS_SHEET_NAME, new_record, identifier_type="name"):
                                 st.success("全体連絡を送信しました！")
                                 st.balloons()
-                                st.rerun() # 送信後、表示を更新するためにrerun
+                                st.rerun() # 成功時にリロード
                             else:
                                 st.error("全体連絡の送信に失敗しました。")
 
             elif menu_selection == "連絡帳一覧":
-                st.header("連絡帳一覧と既読確認")
+                st.header("連絡帳一覧")
                 
                 filter_col1, filter_col2 = st.columns(2)
                 with filter_col1:
                     contact_type_filter = st.selectbox("連絡種別で絞り込み", ["すべて", "全体連絡", "個別連絡"])
-                with filter_col2:
-                    read_filter = st.selectbox("既読状況で絞り込み (個別連絡のみ)", ["すべて", "既読", "未読"])
+                # 既読フィルターは削除
+                # with filter_col2:
+                #     read_filter = st.selectbox("既読状況で絞り込み (個別連絡のみ)", ["すべて", "既読", "未読"])
 
                 search_query = st.text_input("キーワード検索", placeholder="連絡内容、備考などで検索...")
                 
                 st.subheader("📢 全体連絡")
-                # NEW: 全体連絡は一度だけ読み込む
-                general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name") 
+                # `main`の冒頭で読み込んだgeneral_dfを使用
+                # general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name") # ここでの再読み込みを避ける
                 if not general_df.empty:
-                    general_df["timestamp"] = pd.to_datetime(general_df["timestamp"], errors='coerce') 
-                    general_df = general_df.dropna(subset=['timestamp']) 
-                    general_df = general_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+                    display_general_df = general_df.copy() # フィルタリング用にコピー
                     
+                    # 既にtimestamp変換とソートは行われている前提だが、念のため
+                    if "timestamp" not in display_general_df.columns or not pd.api.types.is_datetime64_any_dtype(display_general_df["timestamp"]):
+                        display_general_df["timestamp"] = pd.to_datetime(display_general_df["timestamp"], errors='coerce') 
+                        display_general_df = display_general_df.dropna(subset=['timestamp']) 
+                        display_general_df = display_general_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+
                     if search_query:
-                        general_df = general_df[
-                            general_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False).any(), axis=1)
+                        display_general_df = display_general_df[
+                            display_general_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False).any(), axis=1)
                         ]
                     
                     if contact_type_filter in ["すべて", "全体連絡"]:
-                        if not general_df.empty:
-                            for index, row in general_df.iterrows():
+                        if not display_general_df.empty:
+                            for index, row in display_general_df.iterrows():
                                 with st.expander(f"📅 {row['date']} - {row['sender']} (全体連絡)", expanded=False):
                                     st.write(f"**送信日時:** {row['timestamp'].strftime('%Y/%m/%d %H:%M:%S')}")
                                     st.info(f"**連絡内容:** {row['message']}")
@@ -577,24 +579,24 @@ def main():
 
                 st.subheader("🧑‍🏫 個別連絡")
                 if contact_type_filter in ["すべて", "個別連絡"]:
-                    for student_data in associated_students_data: 
+                    for student_data in associated_students_data:
                         student_name = student_data['student_name']
                         individual_sheet_name = student_data['individual_sheet_name']
 
                         st.markdown(f"##### {student_name} の連絡")
-                        # NEW: 個別連絡も一度だけ読み込む
-                        individual_df = load_sheet_data(individual_sheet_name, identifier_type="name")
+                        individual_df = load_sheet_data(individual_sheet_name, identifier_type="name") # 各生徒のシートを読み込み
                         if not individual_df.empty:
                             individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
                             individual_df = individual_df.dropna(subset=['timestamp']) 
-                            # NEW: 'read_status' 列の存在チェックとデフォルト値の設定はデータフレーム読み込み後に一度だけ
-                            if 'read_status' not in individual_df.columns:
-                                individual_df['read_status'] = '未読' # スプレッドシートに列がない場合
+                            # 'read_status'列の確認とデフォルト値設定は削除
+                            # if 'read_status' not in individual_df.columns:
+                            #     individual_df['read_status'] = '未読'
                             individual_df = individual_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
 
                             display_individual_df = individual_df.copy()
-                            if read_filter != "すべて":
-                                display_individual_df = display_individual_df[display_individual_df["read_status"] == read_filter]
+                            # 既読フィルターは削除
+                            # if read_filter != "すべて":
+                            #     display_individual_df = display_individual_df[display_individual_df["read_status"] == read_filter]
                             if search_query:
                                 display_individual_df = display_individual_df[
                                     display_individual_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False).any(), axis=1)
@@ -602,9 +604,9 @@ def main():
 
                             if not display_individual_df.empty:
                                 for index, row in display_individual_df.iterrows():
-                                    # unique key for expander
-                                    expander_key = f"expander_{student_name}_{index}" 
-                                    with st.expander(f"📅 {row['date']} - {row['sender']} ({row['read_status']})", expanded=False, key=expander_key):
+                                    # 既読ステータスの表示も削除
+                                    # with st.expander(f"📅 {row['date']} - {row['sender']} ({row['read_status']})", expanded=False):
+                                    with st.expander(f"📅 {row['date']} - {row['sender']}", expanded=False):
                                         st.write(f"**送信日時:** {row['timestamp'].strftime('%Y/%m/%d %H:%M:%S')}")
                                         st.info(f"**学校からの連絡:** {row['message']}")
                                         if row['home_reply']:
@@ -621,31 +623,29 @@ def main():
                                             else:
                                                 st.markdown(f"**添付ファイル:** [ファイルリンク]({row['image_url']})")
 
-                                        current_read_status = row['read_status']
-                                        # NEW: ラジオボタンのキーもユニークにし、セッションステートで管理
-                                        radio_key = f"read_status_radio_{student_name}_{index}"
-                                        new_read_status = st.radio(
-                                            f"既読ステータスを更新 (生徒: {student_name}, 日付: {row['date']})",
-                                            ["未読", "既読"],
-                                            index=0 if current_read_status == "未読" else 1,
-                                            key=radio_key
-                                        )
-                                        if new_read_status != current_read_status:
-                                            # display_individual_df のインデックスではなく、元の individual_df のインデックスを探す
-                                            original_row_index = individual_df.index[
-                                                (individual_df['timestamp'] == row['timestamp']) & 
-                                                (individual_df['message'] == row['message']) 
-                                            ].tolist()
+                                        # 既読ステータス更新機能の削除
+                                        # current_read_status = row['read_status']
+                                        # new_read_status = st.radio(
+                                        #     f"既読ステータスを更新 (生徒: {student_name}, ID: {index})",
+                                        #     ["未読", "既読"],
+                                        #     index=0 if current_read_status == "未読" else 1,
+                                        #     key=f"read_status_radio_{student_name}_{index}"
+                                        # )
+                                        # if new_read_status != current_read_status:
+                                        #     original_row_index = individual_df.index[
+                                        #         (individual_df['timestamp'] == row['timestamp']) & 
+                                        #         (individual_df['message'] == row['message'])
+                                        #     ].tolist()
                                             
-                                            if original_row_index:
-                                                sheet_row_index = original_row_index[0] + 2 
-                                                if update_row_in_sheet(individual_sheet_name, sheet_row_index, {"read_status": new_read_status}, identifier_type="name"):
-                                                    st.success(f"{student_name} の既読ステータスを '{new_read_status}' に更新しました。")
-                                                    st.rerun() # 更新が成功したらrerunして表示を更新
-                                                else:
-                                                    st.error("既読ステータスの更新に失敗しました。")
-                                            else:
-                                                st.error("更新対象の連絡が見つかりませんでした。")
+                                        #     if original_row_index:
+                                        #         sheet_row_index = original_row_index[0] + 2
+                                        #         if update_row_in_sheet(individual_sheet_name, sheet_row_index, {"read_status": new_read_status}, identifier_type="name"):
+                                        #             st.success(f"{student_name} の既読ステータスを '{new_read_status}' に更新しました。")
+                                        #             st.rerun()
+                                        #         else:
+                                        #             st.error("既読ステータスの更新に失敗しました。")
+                                        #     else:
+                                        #         st.error("更新対象の連絡が見つかりませんでした。")
                             else:
                                 st.info(f"{student_name} の個別連絡はまだありません。")
                         else:
@@ -659,7 +659,6 @@ def main():
                 if selected_student_name == "全体":
                     st.warning("「全体」の支援メモは作成できません。特定の生徒を選択してください。")
                 else:
-                    # support_memos_df はすでに上で読み込まれている
                     current_memo_row = support_memos_df[support_memos_df['student_name'] == selected_student_name]
                     current_memo = current_memo_row['memo_content'].iloc[0] if not current_memo_row.empty else ""
 
@@ -668,14 +667,14 @@ def main():
                         
                         submitted_memo = st.form_submit_button("メモを保存")
                         if submitted_memo:
-                            if not current_memo_row.empty: 
-                                sheet_row_index = current_memo_row.index[0] + 2 
+                            if not current_memo_row.empty: # 既存のメモがある場合
+                                sheet_row_index = current_memo_row.index[0] + 2 # データフレームのインデックスは0始まり、スプレッドシートは1始まり＋ヘッダー行
                                 if update_row_in_sheet(SUPPORT_MEMO_SHEET_NAME, sheet_row_index, {"memo_content": new_memo_content, "last_updated": datetime.now().strftime("%Y/%m/%d %H:%M:%S")}, identifier_type="name"):
                                     st.success("支援メモを更新しました。")
-                                    st.rerun() # 更新が成功したらrerun
+                                    st.rerun() # 成功時にリロード
                                 else:
                                     st.error("支援メモの更新に失敗しました。")
-                            else: 
+                            else: # 新しいメモの場合
                                 new_memo_record = {
                                     "student_name": selected_student_name,
                                     "memo_content": new_memo_content,
@@ -684,19 +683,23 @@ def main():
                                 }
                                 if append_row_to_sheet(SUPPORT_MEMO_SHEET_NAME, new_memo_record, identifier_type="name"):
                                     st.success("支援メモを保存しました。")
-                                    st.rerun() # 保存が成功したらrerun
+                                    st.rerun() # 成功時にリロード
                                 else:
                                     st.error("支援メモの保存に失敗しました。")
-                            # st.cache_data.clear() は append_row_to_sheet/update_row_in_sheet 内で行われるため削除
+                            st.cache_data.clear()
+                            # st.rerun() # ここは上記成功時のrerunで十分
 
-                    
             elif menu_selection == "カレンダー":
                 st.header("カレンダー (行事予定・配布物)")
                 
-                # calendar_df_full はすでに上で読み込まれている
-                if not calendar_df_full.empty:
+                # `main`の冒頭で読み込んだcalendar_df_fullを使用
+                # if not calendar_df_full.empty: # ここでの再読み込みを避ける
+                if not calendar_df_full.empty: # `main`の冒頭で読み込み済み
                     st.subheader("今後の予定")
 
+                    # 教員が担当クラスを持つ場合、そのクラスと「全体」のイベントをフィルタリング
+                    # 'target_classes'が空または'全体'を含む、または教師の担当クラスのいずれかを含むイベント
+                    # NEW: target_classesがNaNの場合は空文字列として扱う
                     display_events = calendar_df_full[
                         calendar_df_full['target_classes'].fillna('').apply(
                             lambda x: not x or "全体" in [c.strip() for c in x.split(',')] or any(tc in [c.strip() for c in x.split(',')] for tc in st.session_state.teacher_classes)
@@ -704,15 +707,17 @@ def main():
                     ]
 
                     today = datetime.now().date()
+                    # NEW: 日付比較はdatetimeオブジェクト全体ではなく、date部分で行う
                     upcoming_events = display_events[display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
                         for index, event in upcoming_events.iterrows():
                             event_date_obj = event['event_date']
-                            if pd.isna(event_date_obj): 
+                            if pd.isna(event_date_obj): # NaTの場合
                                 st.warning(f"カレンダーイベント '{event.get('event_name', '不明なイベント')}' に無効な日付が含まれています。")
-                                continue 
+                                continue
 
+                            # NEW: どのクラスのイベントかを表示
                             target_classes_info = f" ({event['target_classes']})" if event['target_classes'] else ""
                             st.markdown(f"**{event_date_obj.strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
                             if event['attachment_url']:
@@ -727,11 +732,16 @@ def main():
                         event_name = st.text_input("イベント名")
                         description = st.text_area("説明")
                         
+                        # NEW: 対象クラス選択
+                        # 全ての生徒クラスを取得（教師が担当しないクラスも選択肢に含めるため）
+                        # ここで生徒シートを読み込むのは初回ログイン時のみで済ませたいが、担当クラス選択肢作成のため必要。
+                        # ただし、これもキャッシュされるため、問題は少ないはず。
                         all_student_classes_df = load_sheet_data(STUDENTS_SHEET_NAME, identifier_type="name")
                         all_student_classes = []
                         if not all_student_classes_df.empty and STUDENT_CLASS_COLUMN in all_student_classes_df.columns:
                             all_student_classes = all_student_classes_df[STUDENT_CLASS_COLUMN].dropna().unique().tolist()
 
+                        # 教員の担当クラスと「全体」をマージした選択肢
                         available_options = ["全体"] + list(st.session_state.teacher_classes)
                         unique_available_options = sorted(list(set(available_options)))
                         
@@ -739,7 +749,7 @@ def main():
                         if st.session_state.teacher_classes:
                             default_selected_classes = list(st.session_state.teacher_classes)
                         else:
-                            default_selected_classes = ["全体"] 
+                            default_selected_classes = ["全体"]
 
                         selected_target_classes = st.multiselect(
                             "対象クラス (複数選択可、'全体'を選択すると全クラス対象)",
@@ -757,18 +767,18 @@ def main():
                                 attachment_url = ""
                                 if event_attachment:
                                     with st.spinner("ファイルをGoogle Driveにアップロード中..."):
-                                        event_attachment.seek(0) 
+                                        event_attachment.seek(0)
                                         attachment_url = upload_to_drive(event_attachment, event_attachment.name, event_attachment.type, credentials)
-                                if attachment_url is None: 
+                                if attachment_url is None:
                                     st.error("ファイルアップロードに失敗しました。")
-                                    return 
+                                    return
                                     
                                 new_event = {
                                     "event_date": event_date.strftime("%Y/%m/%d"),
                                     "event_name": event_name,
                                     "description": description,
                                     "attachment_url": attachment_url,
-                                    "target_classes": ", ".join(selected_target_classes) 
+                                    "target_classes": ", ".join(selected_target_classes)
                                 }
                                 if append_row_to_sheet(CALENDAR_SHEET_NAME, new_event, identifier_type="name"):
                                     st.success("イベントを追加しました！")
@@ -781,40 +791,43 @@ def main():
             elif menu_selection == "ダッシュボード":
                 st.header("ダッシュボード")
                 
-                # NEW: ダッシュボード選択時のみ読み込む
-                general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name") 
+                # `main`の冒頭で読み込んだgeneral_dfを使用
+                # general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name") # ここでの再読み込みを避ける
                 general_contacts_count = len(general_df) if not general_df.empty else 0
 
                 total_individual_contacts = 0
-                total_read_individual = 0
-                total_unread_individual = 0
+                # 既読/未読/返信済みのカウントは削除
+                # total_read_individual = 0
+                # total_unread_individual = 0
                 total_replied_individual = 0
 
-                all_individual_contacts_df_for_dashboard = pd.DataFrame() # 月別集計用
-                for student_data in associated_students_data: 
+                all_individual_contacts_df = pd.DataFrame() # ダッシュボード用に全個別連絡をここに集約
+                for student_data in associated_students_data:
                     individual_sheet_name = student_data['individual_sheet_name']
                     individual_df = load_sheet_data(individual_sheet_name, identifier_type="name")
                     if not individual_df.empty:
                         total_individual_contacts += len(individual_df)
-                        if 'read_status' in individual_df.columns:
-                            total_read_individual += (individual_df['read_status'] == '既読').sum()
-                            total_unread_individual += (individual_df['read_status'] == '未読').sum()
+                        # if 'read_status' in individual_df.columns:
+                        #     total_read_individual += (individual_df['read_status'] == '既読').sum()
+                        #     total_unread_individual += (individual_df['read_status'] == '未読').sum()
                         total_replied_individual += (individual_df['home_reply'].astype(str).str.strip() != '').sum()
-                        all_individual_contacts_df_for_dashboard = pd.concat([all_individual_contacts_df_for_dashboard, individual_df])
+                        all_individual_contacts_df = pd.concat([all_individual_contacts_df, individual_df]) # 個別連絡データを結合
                 
                 st.subheader("連絡件数概要")
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3 = st.columns(3) # カラム数を調整
                 col1.metric("全体連絡数", general_contacts_count)
                 col2.metric("個別連絡数", total_individual_contacts)
-                col3.metric("個別連絡 (既読)", total_read_individual)
-                col4.metric("個別連絡 (未読)", total_unread_individual)
+                col3.metric("個別連絡 (返信済)", total_replied_individual) # 返信済みに変更
+                # col3.metric("個別連絡 (既読)", total_read_individual)
+                # col4.metric("個別連絡 (未読)", total_unread_individual)
 
                 st.subheader("月別連絡数 (個別連絡)")
-                if not all_individual_contacts_df_for_dashboard.empty:
-                    all_individual_contacts_df_for_dashboard["timestamp"] = pd.to_datetime(all_individual_contacts_df_for_dashboard["timestamp"], errors='coerce') 
-                    all_individual_contacts_df_for_dashboard = all_individual_contacts_df_for_dashboard.dropna(subset=['timestamp']) 
-                    all_individual_contacts_df_for_dashboard["month"] = all_individual_contacts_df_for_dashboard["timestamp"].dt.to_period("M")
-                    monthly_counts = all_individual_contacts_df_for_dashboard["month"].value_counts().sort_index()
+                
+                if not all_individual_contacts_df.empty:
+                    all_individual_contacts_df["timestamp"] = pd.to_datetime(all_individual_contacts_df["timestamp"], errors='coerce') 
+                    all_individual_contacts_df = all_individual_contacts_df.dropna(subset=['timestamp']) 
+                    all_individual_contacts_df["month"] = all_individual_contacts_df["timestamp"].dt.to_period("M")
+                    monthly_counts = all_individual_contacts_df["month"].value_counts().sort_index()
                     st.bar_chart(monthly_counts)
                 else:
                     st.info("個別連絡データがありません。")
@@ -834,58 +847,36 @@ def main():
                 st.sidebar.info(f"連絡帳: {selected_student_name}")
             else:
                 st.error("紐付けられた生徒情報がありません。")
-                return # st.stop() の代わりに return
+                st.stop()
 
             selected_individual_sheet_name = None 
-            selected_student_class = None 
+            selected_student_class = None
             if selected_student_name:
                 for student_data in associated_students_data:
                     if student_data['student_name'] == selected_student_name:
                         selected_individual_sheet_name = student_data['individual_sheet_name']
-                        selected_student_class = student_data.get(STUDENT_CLASS_COLUMN) 
+                        selected_student_class = student_data.get(STUDENT_CLASS_COLUMN)
                         break
             if selected_individual_sheet_name is None:
                 st.error(f"生徒 '{selected_student_name}' の個別連絡シート名が見つかりません。生徒情報シートを確認してください。") 
-                return # st.stop() の代わりに return
-
-            # NEW: 必要なメニュー選択時のみデータを読み込む
-            general_df_parent = pd.DataFrame()
-            individual_df_parent = pd.DataFrame()
-            calendar_df_full_parent = pd.DataFrame()
-
-            if menu_selection in ["自分の連絡帳", "返信作成"]:
-                general_df_parent = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name") 
-                individual_df_parent = load_sheet_data(selected_individual_sheet_name, identifier_type="name") 
-
-            if menu_selection == "カレンダー":
-                calendar_df_full_parent = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name")
-                if calendar_df_full_parent.empty:
-                    st.warning("カレンダーデータが読み込めませんでした。シート名または権限を確認してください。")
-                    calendar_df_full_parent = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
-                
-                if 'target_classes' not in calendar_df_full_parent.columns:
-                    calendar_df_full_parent['target_classes'] = '' 
-                
-                if 'event_date' in calendar_df_full_parent.columns:
-                    calendar_df_full_parent['event_date'] = pd.to_datetime(calendar_df_full_parent['event_date'], format='%Y/%m/%d', errors='coerce')
-                    calendar_df_full_parent = calendar_df_full_parent.dropna(subset=['event_date']) 
-                else:
-                    calendar_df_full_parent = pd.DataFrame(columns=['event_date', 'event_name', 'description', 'attachment_url', 'target_classes'])
-
-                if not calendar_df_full_parent.empty and 'event_date' in calendar_df_full_parent.columns:
-                    calendar_df_full_parent = calendar_df_full_parent.sort_values(by='event_date')
+                st.stop()
 
 
             if menu_selection == "自分の連絡帳":
                 st.header(f"{selected_student_name} 連絡帳")
                 
                 st.subheader("📢 全体連絡")
-                if not general_df_parent.empty:
-                    general_df_parent["timestamp"] = pd.to_datetime(general_df_parent["timestamp"], errors='coerce') 
-                    general_df_parent = general_df_parent.dropna(subset=['timestamp']) 
-                    general_df_parent = general_df_parent.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+                # `main`の冒頭で読み込んだgeneral_dfを使用
+                # general_df = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name") # ここでの再読み込みを避ける
+                if not general_df.empty:
+                    display_general_df = general_df.copy() # フィルタリング用にコピー
                     
-                    for index, row in general_df_parent.iterrows():
+                    if "timestamp" not in display_general_df.columns or not pd.api.types.is_datetime64_any_dtype(display_general_df["timestamp"]):
+                        display_general_df["timestamp"] = pd.to_datetime(display_general_df["timestamp"], errors='coerce') 
+                        display_general_df = display_general_df.dropna(subset=['timestamp']) 
+                        display_general_df = display_general_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+                    
+                    for index, row in display_general_df.iterrows():
                         with st.expander(f"📅 {row['date']} - {row['sender']} (全体連絡)", expanded=False):
                             st.write(f"**送信日時:** {row['timestamp'].strftime('%Y/%m/%d %H:%M:%S')}")
                             st.info(f"**連絡内容:** {row['message']}")
@@ -903,25 +894,25 @@ def main():
                     st.info("全体連絡はまだありません。")
 
                 st.subheader(f"🧑‍🏫 {selected_student_name} への個別連絡")
-                if not individual_df_parent.empty:
-                    individual_df_parent["timestamp"] = pd.to_datetime(individual_df_parent["timestamp"], errors='coerce') 
-                    individual_df_parent = individual_df_parent.dropna(subset=['timestamp']) 
-                    if 'read_status' not in individual_df_parent.columns:
-                        individual_df_parent['read_status'] = '未読'
-                    individual_df_parent = individual_df_parent.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+                individual_df = load_sheet_data(selected_individual_sheet_name, identifier_type="name") 
+                if not individual_df.empty:
+                    individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
+                    individual_df = individual_df.dropna(subset=['timestamp']) 
+                    # 既読ステータスの処理を削除
+                    # if 'read_status' not in individual_df.columns:
+                    #     individual_df['read_status'] = '未読'
+                    individual_df = individual_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
 
-                    for index, row in individual_df_parent.iterrows():
-                        expander_key_parent = f"expander_parent_{selected_student_name}_{index}"
-                        with st.expander(f"📅 {row['date']} - {row['sender']} ({row['read_status']})", expanded=False, key=expander_key_parent):
+                    for index, row in individual_df.iterrows():
+                        # 既読ステータスの表示を削除
+                        # with st.expander(f"📅 {row['date']} - {row['sender']} ({row['read_status']})", expanded=False):
+                        with st.expander(f"📅 {row['date']} - {row['sender']}", expanded=False):
                             st.write(f"**送信日時:** {row['timestamp'].strftime('%Y/%m/%d %H:%M:%S')}")
                             st.info(f"**学校からの連絡:** {row['message']}")
                             if row['home_reply']:
                                 st.success(f"**あなたの返信:** {row['home_reply']}")
                             if row['items_notice']:
                                 st.warning(f"**持ち物・特記事項:** {row['items_notice']}")
-                            # 保護者には備考を表示しない
-                            # if row['remarks']:
-                            #     st.caption(f"**備考:** {row['remarks']}")
                             if row['image_url']:
                                 if row['image_url'].lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
                                     st.image(row['image_url'], caption="添付画像", width=300)
@@ -930,32 +921,29 @@ def main():
                                 else:
                                     st.markdown(f"**添付ファイル:** [ファイルリンク]({row['image_url']})")
                             
-                            # NEW: 既読ボタンの処理を修正
-                            unique_read_button_key = f"read_button_parent_{selected_student_name}_{index}"
-                            if row['read_status'] == '未読':
-                                if unique_read_button_key not in st.session_state.read_button_clicked:
-                                    st.session_state.read_button_clicked[unique_read_button_key] = False
-                                
-                                if not st.session_state.read_button_clicked[unique_read_button_key]:
-                                    st.info("この連絡はまだ既読になっていません。")
-                                    if st.button("既読にする", key=unique_read_button_key):
-                                        original_row_index = individual_df_parent.index[
-                                            (individual_df_parent['timestamp'] == row['timestamp']) &
-                                            (individual_df_parent['message'] == row['message']) 
-                                        ].tolist()
+                            # 既読ボタンの削除
+                            # if row['read_status'] == '未読':
+                            #     if f"mark_read_{selected_student_name}_{index}" not in st.session_state:
+                            #         st.session_state[f"mark_read_{selected_student_name}_{index}"] = False
+
+                            #     if not st.session_state[f"mark_read_{selected_student_name}_{index}"]:
+                            #         st.info("この連絡はまだ既読になっていません。")
+                            #         if st.button("既読にする", key=f"read_button_{selected_student_name}_{index}"):
+                            #             original_row_index = individual_df.index[
+                            #                 (individual_df['timestamp'] == row['timestamp']) &
+                            #                 (individual_df['message'] == row['message'])
+                            #             ].tolist()
                                         
-                                        if original_row_index:
-                                            sheet_row_index = original_row_index[0] + 2 
-                                            if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, {"read_status": "既読"}, identifier_type="name"): 
-                                                st.session_state.read_button_clicked[unique_read_button_key] = True # 状態を更新
-                                                st.success("連絡を既読にしました。")
-                                                st.rerun() # 既読にしたらrerunして表示を更新
-                                            else:
-                                                st.error("既読ステータスの更新に失敗しました。")
-                                        else:
-                                            st.error("更新対象の連絡が見つかりませんでした。")
-                            else:
-                                st.success("この連絡は既読です。")
+                            #             if original_row_index:
+                            #                 sheet_row_index = original_row_index[0] + 2
+                            #                 if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, {"read_status": "既読"}, identifier_type="name"): 
+                            #                     st.session_state[f"mark_read_{selected_student_name}_{index}"] = True
+                            #                     st.success("連絡を既読にしました。")
+                            #                     st.rerun()
+                            #                 else:
+                            #                     st.error("既読ステータスの更新に失敗しました。")
+                            #             else:
+                            #                 st.error("更新対象の連絡が見つかりませんでした。")
                         st.markdown("---")
                 else:
                     st.info(f"{selected_student_name} への個別連絡はまだありません。")
@@ -964,25 +952,40 @@ def main():
                 st.header(f"{selected_student_name} からの返信作成")
                 st.info("返信したい個別連絡を選択してください。")
 
-                # individual_df_parent はすでに上で読み込まれている
-                if not individual_df_parent.empty:
-                    individual_df_parent["timestamp"] = pd.to_datetime(individual_df_parent["timestamp"], errors='coerce') 
-                    individual_df_parent = individual_df_parent.dropna(subset=['timestamp']) 
+                individual_df = load_sheet_data(selected_individual_sheet_name, identifier_type="name") 
+                if not individual_df.empty:
+                    individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
+                    individual_df = individual_df.dropna(subset=['timestamp']) 
                     
-                    reply_needed_df = individual_df_parent[
-                        (individual_df_parent["home_reply"].astype(str).str.strip() == "")
-                    ]
+                    # home_replyが空の連絡のみを対象とする
+                    reply_needed_df = individual_df[
+                        (individual_df["home_reply"].astype(str).str.strip() == "")
+                    ].sort_values(by="timestamp", ascending=False) # 最新の未返信連絡を優先
 
                     if not reply_needed_df.empty:
-                        latest_unreplied = reply_needed_df.sort_values(by="timestamp", ascending=False).iloc[0]
+                        # セレクトボックスで未返信の連絡を選択できるようにする
+                        contact_options = [
+                            f"{row['date']} - {row['sender']}: {row['message'][:50]}..." 
+                            for idx, row in reply_needed_df.iterrows()
+                        ]
+                        selected_contact_display = st.selectbox(
+                            "返信する連絡を選択してください",
+                            options=contact_options,
+                            key="select_contact_to_reply"
+                        )
                         
-                        st.subheader(f"返信対象連絡: {latest_unreplied['date']} の学校からの連絡")
-                        st.info(latest_unreplied['message'])
-                        if latest_unreplied['image_url']:
-                            if latest_unreplied['image_url'].lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-                                st.image(latest_unreplied['image_url'], caption="添付画像", width=300)
-                            elif latest_unreplied['image_url'].lower().endswith(('.pdf')):
-                                st.markdown(f"添付PDF: [こちらをクリックして閲覧]({latest_unreplied['image_url']})")
+                        # 選択された連絡に対応する元のDataFrameの行を見つける
+                        selected_contact_row = reply_needed_df[
+                            reply_needed_df.apply(lambda row: f"{row['date']} - {row['sender']}: {row['message'][:50]}..." == selected_contact_display, axis=1)
+                        ].iloc[0]
+
+                        st.subheader(f"返信対象連絡: {selected_contact_row['date']} の学校からの連絡")
+                        st.info(selected_contact_row['message'])
+                        if selected_contact_row['image_url']:
+                            if selected_contact_row['image_url'].lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                                st.image(selected_contact_row['image_url'], caption="添付画像", width=300)
+                            elif selected_contact_row['image_url'].lower().endswith(('.pdf')):
+                                st.markdown(f"添付PDF: [こちらをクリックして閲覧]({selected_contact_row['image_url']})")
 
                         with st.form("reply_form", clear_on_submit=True):
                             home_reply = st.text_area("学校への返信内容", height=150, placeholder="先生への返信を入力してください。")
@@ -1000,23 +1003,27 @@ def main():
                                             image_url_reply = upload_to_drive(uploaded_file_reply, uploaded_file_reply.name, uploaded_file_reply.type, credentials)
                                     if image_url_reply is None: 
                                         st.error("画像アップロードに失敗しました。再度お試しください。")
-                                        return 
+                                        return
                                         
-                                    original_row_index = individual_df_parent.index[
-                                        (individual_df_parent['timestamp'] == latest_unreplied['timestamp']) &
-                                        (individual_df_parent['message'] == latest_unreplied['message'])
+                                    # original_row_index の取得も正確にする
+                                    original_row_index = individual_df.index[
+                                        (individual_df['timestamp'] == selected_contact_row['timestamp']) &
+                                        (individual_df['message'] == selected_contact_row['message'])
                                     ].tolist()
                                     
                                     if original_row_index:
                                         sheet_row_index = original_row_index[0] + 2 
                                         data_to_update = {"home_reply": home_reply}
                                         if image_url_reply:
-                                            data_to_update["image_url"] = image_url_reply
+                                            # 返信時の画像を既存の image_url に上書きするか、追加で記録するかは要検討。
+                                            # 今回はとりあえず home_reply と同じ行の image_url を更新する形に。
+                                            # もし個別の画像URLを保存したい場合は、スプレッドシート側に別の列が必要。
+                                            data_to_update["image_url_parent"] = image_url_reply # 新しい列が必要な場合
                                         
                                         if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, data_to_update, identifier_type="name"):
                                             st.success("返信を送信しました！")
                                             st.balloons()
-                                            st.rerun() # 返信が成功したらrerun
+                                            st.rerun()
                                         else:
                                             st.error("返信の保存に失敗しました。")
                                     else:
@@ -1029,26 +1036,32 @@ def main():
             elif menu_selection == "カレンダー":
                 st.header("カレンダー (行事予定・配布物)")
                 
-                # calendar_df_full_parent はすでに上で読み込まれている
-                if not calendar_df_full_parent.empty:
+                # `main`の冒頭で読み込んだcalendar_df_fullを使用
+                # if not calendar_df_full.empty: # ここでの再読み込みを避ける
+                if not calendar_df_full.empty:
                     st.subheader("今後の予定")
                     today = datetime.now().date()
                     
-                    parent_display_events = calendar_df_full_parent[
-                        calendar_df_full_parent['target_classes'].fillna('').apply(
+                    # 保護者の場合、自分の子どものクラスに関連するイベントと「全体」のイベントをフィルタリング
+                    # 'target_classes'が空または'全体'を含む、または保護者の子どものクラスを含むイベント
+                    # NEW: target_classesがNaNの場合は空文字列として扱う
+                    parent_display_events = calendar_df_full[
+                        calendar_df_full['target_classes'].fillna('').apply(
                             lambda x: not x or "全体" in [c.strip() for c in x.split(',')] or (selected_student_class and selected_student_class in [c.strip() for c in x.split(',')])
                         )
                     ]
 
+                    # NEW: 日付比較はdatetimeオブジェクト全体ではなく、date部分で行う
                     upcoming_events = parent_display_events[parent_display_events['event_date'].dt.date >= today]
                     
                     if not upcoming_events.empty:
                         for index, event in upcoming_events.iterrows():
                             event_date_obj = event['event_date']
-                            if pd.isna(event_date_obj): 
+                            if pd.isna(event_date_obj): # NaTの場合
                                 st.warning(f"カレンダーイベント '{event.get('event_name', '不明なイベント')}' に無効な日付が含まれています。")
-                                continue 
+                                continue
 
+                            # NEW: どのクラスのイベントかを表示
                             target_classes_info = f" ({event['target_classes']})" if event['target_classes'] else ""
                             st.markdown(f"**{event_date_obj.strftime('%Y/%m/%d')}**: **{event['event_name']}**{target_classes_info} - {event['description']}")
                             if event['attachment_url']:
@@ -1072,10 +1085,35 @@ def main():
         st.markdown("- 過去のやり取りを自動保存し、振り返りや支援記録にも活用可能")
         
         st.markdown("---")
+        # NEW: ログイン前のトップページにプライバシーポリシーと利用規約のリンクを追加
         st.markdown(f"当アプリをご利用になる前に、[プライバシーポリシー]({PRIVACY_POLICY_URL})と[利用規約]({TERMS_OF_SERVICE_URL})をご確認ください。", unsafe_allow_html=True)
 
         st.markdown("新しい教育ツールのイメージです。")
-        # ログイン前のイメージ
         
 if __name__ == "__main__":
+    # `main`関数外で一度だけ全体連絡シートを読み込み、セッションステートに格納
+    # これにより、ページの再描画ごとに毎回APIリクエストが飛ぶのを防ぐ
+    if 'general_contacts_df' not in st.session_state:
+        st.session_state.general_contacts_df = pd.DataFrame() # 初期化
+    if 'calendar_df' not in st.session_state:
+        st.session_state.calendar_df = pd.DataFrame() # 初期化
+
+    # 初回またはキャッシュクリア後に読み込む
+    if st.session_state.general_contacts_df.empty:
+        st.session_state.general_contacts_df = load_sheet_data(GENERAL_CONTACTS_SHEET_NAME, identifier_type="name")
+        if not st.session_state.general_contacts_df.empty:
+            st.session_state.general_contacts_df["timestamp"] = pd.to_datetime(st.session_state.general_contacts_df["timestamp"], errors='coerce') 
+            st.session_state.general_contacts_df = st.session_state.general_contacts_df.dropna(subset=['timestamp']) 
+            st.session_state.general_contacts_df = st.session_state.general_contacts_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+    
+    if st.session_state.calendar_df.empty:
+        st.session_state.calendar_df = load_sheet_data(CALENDAR_SHEET_NAME, identifier_type="name")
+        if not st.session_state.calendar_df.empty:
+            if 'target_classes' not in st.session_state.calendar_df.columns:
+                st.session_state.calendar_df['target_classes'] = ''
+            if 'event_date' in st.session_state.calendar_df.columns:
+                st.session_state.calendar_df['event_date'] = pd.to_datetime(st.session_state.calendar_df['event_date'], format='%Y/%m/%d', errors='coerce')
+                st.session_state.calendar_df = st.session_state.calendar_df.dropna(subset=['event_date'])
+            st.session_state.calendar_df = st.session_state.calendar_df.sort_values(by='event_date')
+
     main()
