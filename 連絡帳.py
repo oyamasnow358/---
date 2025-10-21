@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
@@ -9,11 +10,47 @@ from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
-import os # NEW: osモジュールをインポート
-import toml # NEW: tomlモジュールをインポート
+import toml
 
-# --- Streamlit Secretsからの設定読み込み ---
-# .streamlit/secrets.toml に設定してください。
+# --- Streamlit Secrets/Environment Variablesからの設定読み込みを安全に行うヘルパー関数 ---
+def get_secret(key, default=None, section=None):
+    """
+    st.secrets から設定を読み込みます。
+    存在しない場合は、環境変数 (os.getenv) から読み込みます。
+    セクションが指定されている場合、環境変数名は SECTION_KEY の形式になります。
+    例: get_secret("sheet_name", "全体連絡", "app_settings")
+        -> st.secrets["app_settings"]["sheet_name"]
+        -> 環境変数 APP_SETTINGS_SHEET_NAME
+    """
+    # 1. st.secrets から取得を試みる
+    try:
+        if section:
+            if section in st.secrets and key in st.secrets[section]:
+                return st.secrets[section][key]
+        elif key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        # st.secrets が存在しない、またはキーが見つからない場合
+        pass
+
+    # 2. 環境変数から取得を試みる
+    env_key = f"{section.upper()}_{key.upper()}" if section else key.upper()
+    value = os.getenv(env_key)
+
+    # 環境変数から取得できなかった場合、デフォルト値を返す
+    if value is None:
+        return default
+    
+    # 環境変数から取得した値がJSON文字列の場合、パースを試みる (例: GCP_OAUTH_REDIRECT_URIS がJSON配列の場合)
+    if isinstance(value, str) and (value.startswith('[') and value.endswith(']')) or \
+                                   (value.startswith('{') and value.endswith('}')):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            pass # JSONとしてパースできない場合はそのまま文字列として返す
+
+    return value
+
 
 # --- 定数設定 ---
 SCOPES = [
@@ -24,27 +61,38 @@ SCOPES = [
     'openid'
 ]
 
-# NEW: プライバシーポリシーと利用規約のURLを定数として追加
 PRIVACY_POLICY_URL = "https://docs.google.com/document/d/1uJX0GOorVXEutA7IKJOyBG6tZrLDesE7y_zAZGbSsKg/edit?tab=t.0"
 TERMS_OF_SERVICE_URL = "https://docs.google.com/document/d/171oLSgxk55KCZhdTSJf0R3ibTWoIQPPrlQvz8EgAA0s/edit?tab=t.0"
 
-# アプリケーション設定（シート名を読み込むように変更）
-# app_settingsは環境変数で設定されているため、st.secretsからアクセス可能
-try:
-    GENERAL_CONTACTS_SHEET_NAME = st.secrets["app_settings"]["general_contacts_sheet_name"]
-    STUDENTS_SHEET_NAME = st.secrets["app_settings"]["students_sheet_name"]
-    TEACHERS_SHEET_NAME = st.secrets["app_settings"]["teachers_sheet_name"]
-    SUPPORT_MEMO_SHEET_NAME = st.secrets["app_settings"]["support_memo_sheet_name"]
-    CALENDAR_SHEET_NAME = st.secrets["app_settings"]["calendar_sheet_name"]
-    DRIVE_FOLDER_ID = st.secrets["app_settings"]["drive_folder_id"]
+# --- アプリケーション設定（シート名などを安全に読み込む） ---
+# get_secret関数を使用して、st.secrets または 環境変数から読み込む
+GENERAL_CONTACTS_SHEET_NAME = get_secret("general_contacts_sheet_name", default="全体連絡", section="app_settings")
+STUDENTS_SHEET_NAME = get_secret("students_sheet_name", default="生徒情報", section="app_settings")
+TEACHERS_SHEET_NAME = get_secret("teachers_sheet_name", default="教師情報", section="app_settings")
+SUPPORT_MEMO_SHEET_NAME = get_secret("support_memo_sheet_name", default="支援メモ", section="app_settings")
+CALENDAR_SHEET_NAME = get_secret("calendar_sheet_name", default="カレンダー", section="app_settings")
+DRIVE_FOLDER_ID = get_secret("drive_folder_id", default=None, section="app_settings")
 
-    # NEW: 教師シートのクラス列名を設定
-    TEACHER_CLASS_COLUMN = st.secrets["app_settings"]["teacher_class_column"] # 例: "class_name"
-    # NEW: 生徒シートのクラス列名を設定
-    STUDENT_CLASS_COLUMN = st.secrets["app_settings"]["student_class_column"] # 例: "class_name"
-except KeyError as e:
-    st.error(f"アプリケーション設定の読み込みに失敗しました。RenderのEnvironment Variablesに 'app_settings_{e.args[0]}' が正しく設定されているか確認してください。")
-    st.stop() # 設定がなければアプリは動作しないため停止
+TEACHER_CLASS_COLUMN = get_secret("teacher_class_column", default="担当クラス", section="app_settings")
+STUDENT_CLASS_COLUMN = get_secret("student_class_column", default="クラス名", section="app_settings")
+
+# 必須設定のチェック
+required_settings = {
+    "GENERAL_CONTACTS_SHEET_NAME": GENERAL_CONTACTS_SHEET_NAME,
+    "STUDENTS_SHEET_NAME": STUDENTS_SHEET_NAME,
+    "TEACHERS_SHEET_NAME": TEACHERS_SHEET_NAME,
+    "SUPPORT_MEMO_SHEET_NAME": SUPPORT_MEMO_SHEET_NAME,
+    "CALENDAR_SHEET_NAME": CALENDAR_SHEET_NAME,
+    "DRIVE_FOLDER_ID": DRIVE_FOLDER_ID,
+    "TEACHER_CLASS_COLUMN": TEACHER_CLASS_COLUMN,
+    "STUDENT_CLASS_COLUMN": STUDENT_CLASS_COLUMN,
+}
+
+for setting_name, setting_value in required_settings.items():
+    if setting_value is None:
+        st.error(f"アプリケーション設定 '{setting_name}' が見つかりません。'.streamlit/secrets.toml' または Render の Environment Variables に '{setting_name}' (または 'app_settings_{setting_name}' ) を設定してください。")
+        st.stop()
+
 
 # --- Streamlitセッション状態の初期化 ---
 if 'logged_in' not in st.session_state:
@@ -64,43 +112,50 @@ if 'teacher_classes' not in st.session_state: # NEW: 教員の担当クラスを
 # --- ヘルパー関数 ---
 @st.cache_resource(ttl=3600) # キャッシュを追加してファイルの読み込みを最適化
 def get_service_account_info():
-    """Render Secret File (GSPRED_SECRETS.TOML) からGspreadサービスアカウント情報を取得"""
-    # RenderでSecret Fileを './GSPRED_SECRETS.TOML' (または適切なパス) として保存した場合
-    secrets_file_path = "./GSPRED_SECRETS.TOML" # 大文字小文字に注意
-
+    """Render Secret File (GSPRED_SECRETS.TOML), st.secrets, または環境変数からGspreadサービスアカウント情報を取得"""
     service_account_info = None
 
-    # Streamlit Cloudの環境変数としてgspread_service_accountがあるか確認
+    # 1. Streamlit Cloudのst.secretsからgspread_service_accountを取得
     if "gspread_service_account" in st.secrets:
-        # Streamlit Cloud (またはst.secretsにTOML形式で設定済み) の場合
         service_account_info = st.secrets["gspread_service_account"]
-    elif os.path.exists(secrets_file_path):
-        # RenderのSecret Fileとして配置されている場合
+        if "private_key" in service_account_info:
+            service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+        return service_account_info
+
+    # 2. RenderのSecret Fileとして配置されている場合
+    secrets_file_path = "./GSPRED_SECRETS.TOML"
+    if os.path.exists(secrets_file_path):
         try:
             with open(secrets_file_path, "r") as f:
                 raw_secrets = toml.load(f)
                 service_account_info = raw_secrets.get("gspread_service_account")
-                if not service_account_info:
-                    st.error(f"Secret File '{secrets_file_path}' に 'gspread_service_account' セクションが見つかりません。")
+                if service_account_info:
+                    if "private_key" in service_account_info:
+                        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+                    return service_account_info
+                else:
+                    st.warning(f"Secret File '{secrets_file_path}' に 'gspread_service_account' セクションが見つかりません。")
         except toml.TomlDecodeError as e:
-            st.error(f"Secret File '{secrets_file_path}' のパースに失敗しました: {e}")
-        except FileNotFoundError: # os.path.exists でチェック済みなので通常は発生しない
-            st.error(f"エラー: Secret File '{secrets_file_path}' が見つかりません。")
+            st.warning(f"Secret File '{secrets_file_path}' のパースに失敗しました: {e}")
         except Exception as e:
-            st.error(f"Gspread Secret Fileの読み込み中に予期せぬエラーが発生しました: {e}")
-    else:
-        st.error(f"Gspreadサービスアカウント情報が見つかりません。RenderのSecret Filesに '{secrets_file_path}' として設定されているか、st.secretsに定義されているか確認してください。")
-        st.stop() # 情報を取得できない場合はアプリを停止
+            st.warning(f"Gspread Secret Fileの読み込み中に予期せぬエラーが発生しました: {e}")
 
-    if service_account_info:
-        # private_key内の\nを実際の改行文字に変換
-        if "private_key" in service_account_info:
-            service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-        return service_account_info
-    else:
-        st.error("Gspreadサービスアカウント情報が取得できませんでした。")
-        st.stop() # 情報を取得できない場合はアプリを停止
+    # 3. 環境変数からJSON文字列として取得を試みる (Render Environment Variables)
+    gspread_json_str = os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON")
+    if gspread_json_str:
+        try:
+            service_account_info = json.loads(gspread_json_str)
+            if "private_key" in service_account_info:
+                service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+            return service_account_info
+        except json.JSONDecodeError as e:
+            st.error(f"環境変数 'GSPREAD_SERVICE_ACCOUNT_JSON' のJSONパースに失敗しました: {e}")
+        except Exception as e:
+            st.error(f"環境変数からGspreadサービスアカウント情報を読み込み中に予期せぬエラーが発生しました: {e}")
 
+    st.error("Gspreadサービスアカウント情報が見つかりません。'.streamlit/secrets.toml'、RenderのSecret Files ('./GSPRED_SECRETS.TOML')、または環境変数 ('GSPREAD_SERVICE_ACCOUNT_JSON') に設定されているか確認してください。")
+    st.stop()
+    return None # 到達しないはず
 
 @st.cache_resource(ttl=3600)
 def get_gspread_client():
@@ -108,7 +163,6 @@ def get_gspread_client():
     try:
         service_account_info = get_service_account_info()
         if service_account_info is None:
-            # get_service_account_info内でst.stop()が呼ばれているはずだが、念のため
             return None
         gc = gspread.service_account_from_dict(service_account_info)
         return gc
@@ -123,17 +177,13 @@ def load_sheet_data(identifier, identifier_type="id", worksheet_name="シート1
     """Googleスプレッドシートから指定シートのデータを読み込む (IDまたは名前で指定)"""
     gc = get_gspread_client()
     if gc is None:
-        # get_gspread_client内でエラー表示とst.stop()が呼ばれているはずだが、念のため
-        # ここで再度エラーメッセージを表示すると重複するため、シンプルなメッセージに
         st.error(f"スプレッドシート '{identifier}' の読み込みに失敗しました。")
         return pd.DataFrame()
     try:
         if identifier_type == "id":
             spreadsheet = gc.open_by_id(identifier)
-            # st.sidebar.info(f"IDでシートを開いています: {identifier}") # デバッグ用
         elif identifier_type == "name":
             spreadsheet = gc.open(identifier)
-            # st.sidebar.info(f"名前でシートを開いています: {identifier}") # デバッグ用
         else:
             st.error("無効なidentifier_typeが指定されました。'id' または 'name' を使用してください。")
             return pd.DataFrame()
@@ -248,19 +298,35 @@ def upload_to_drive(file_obj, file_name, mime_type, credentials):
 def authenticate_google_oauth():
     creds = st.session_state.credentials
 
-    # gcp_oauthは環境変数で設定されているため、st.secretsからアクセス可能
-    try:
-        client_id = st.secrets["gcp_oauth"]["client_id"]
-        project_id = st.secrets["gcp_oauth"]["project_id"]
-        auth_uri = st.secrets["gcp_oauth"]["auth_uri"]
-        token_uri = st.secrets["gcp_oauth"]["token_uri"]
-        auth_provider_x509_cert_url = st.secrets["gcp_oauth"]["auth_provider_x509_cert_url"]
-        client_secret = st.secrets["gcp_oauth"]["client_secret"]
-        redirect_uris = st.secrets["gcp_oauth"]["redirect_uris"]
-        javascript_origins = st.secrets["gcp_oauth"]["javascript_origins"]
-    except KeyError as e:
-        st.error(f"OAuth設定の読み込みに失敗しました。RenderのEnvironment Variablesに 'gcp_oauth_{e.args[0]}' が正しく設定されているか確認してください。")
-        st.stop() # 設定がなければアプリは動作しないため停止
+    # gcp_oauthはst.secretsまたは環境変数で設定されている
+    client_id = get_secret("client_id", default=None, section="gcp_oauth")
+    project_id = get_secret("project_id", default=None, section="gcp_oauth")
+    auth_uri = get_secret("auth_uri", default=None, section="gcp_oauth")
+    token_uri = get_secret("token_uri", default=None, section="gcp_oauth")
+    auth_provider_x509_cert_url = get_secret("auth_provider_x509_cert_url", default=None, section="gcp_oauth")
+    client_secret = get_secret("client_secret", default=None, section="gcp_oauth")
+    redirect_uris = get_secret("redirect_uris", default=[], section="gcp_oauth") # リストになる想定
+    javascript_origins = get_secret("javascript_origins", default=[], section="gcp_oauth") # リストになる想定
+
+    # 必須設定のチェック
+    oauth_settings = {
+        "client_id": client_id,
+        "project_id": project_id,
+        "auth_uri": auth_uri,
+        "token_uri": token_uri,
+        "auth_provider_x509_cert_url": auth_provider_x509_cert_url,
+        "client_secret": client_secret,
+    }
+    for setting_name, setting_value in oauth_settings.items():
+        if setting_value is None:
+            st.error(f"OAuth設定 '{setting_name}' が見つかりません。'.streamlit/secrets.toml' または Render の Environment Variables に '{setting_name}' (または 'gcp_oauth_{setting_name}' ) を設定してください。")
+            st.stop()
+    
+    if not redirect_uris:
+        st.error("OAuth設定 'redirect_uris' が見つかりません。'.streamlit/secrets.toml' または Render の Environment Variables に設定してください。")
+        st.stop()
+    if not javascript_origins:
+        st.warning("OAuth設定 'javascript_origins' が見つかりません。開発環境では必須ではありませんが、本番環境では設定を推奨します。")
 
 
     if not creds or not creds.valid:
