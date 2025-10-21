@@ -42,8 +42,8 @@ def get_secret(key, default=None, section=None):
         return default
     
     # 環境変数から取得した値がJSON文字列の場合、パースを試みる (例: GCP_OAUTH_REDIRECT_URIS がJSON配列の場合)
-    if isinstance(value, str) and (value.startswith('[') and value.endswith(']')) or \
-                                   (value.startswith('{') and value.endswith('}')):
+    if isinstance(value, str) and ((value.startswith('[') and value.endswith(']')) or \
+                                   (value.startswith('{') and value.endswith('}'))):
         try:
             return json.loads(value)
         except json.JSONDecodeError:
@@ -113,49 +113,50 @@ if 'teacher_classes' not in st.session_state: # NEW: 教員の担当クラスを
 @st.cache_resource(ttl=3600) # キャッシュを追加してファイルの読み込みを最適化
 def get_service_account_info():
     """Render Secret File (GSPRED_SECRETS.TOML), st.secrets, または環境変数からGspreadサービスアカウント情報を取得"""
-    service_account_info = None
-
+    service_account_info_original = None
+    
     # 1. Streamlit Cloudのst.secretsからgspread_service_accountを取得
     if "gspread_service_account" in st.secrets:
-        service_account_info = st.secrets["gspread_service_account"]
-        if "private_key" in service_account_info:
-            service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-        return service_account_info
-
+        service_account_info_original = st.secrets["gspread_service_account"]
+    
     # 2. RenderのSecret Fileとして配置されている場合
-    secrets_file_path = "./GSPRED_SECRETS.TOML"
-    if os.path.exists(secrets_file_path):
-        try:
-            with open(secrets_file_path, "r") as f:
-                raw_secrets = toml.load(f)
-                service_account_info = raw_secrets.get("gspread_service_account")
-                if service_account_info:
-                    if "private_key" in service_account_info:
-                        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-                    return service_account_info
-                else:
-                    st.warning(f"Secret File '{secrets_file_path}' に 'gspread_service_account' セクションが見つかりません。")
-        except toml.TomlDecodeError as e:
-            st.warning(f"Secret File '{secrets_file_path}' のパースに失敗しました: {e}")
-        except Exception as e:
-            st.warning(f"Gspread Secret Fileの読み込み中に予期せぬエラーが発生しました: {e}")
+    if service_account_info_original is None:
+        secrets_file_path = "./GSPRED_SECRETS.TOML"
+        if os.path.exists(secrets_file_path):
+            try:
+                with open(secrets_file_path, "r") as f:
+                    raw_secrets = toml.load(f)
+                    service_account_info_original = raw_secrets.get("gspread_service_account")
+            except toml.TomlDecodeError as e:
+                st.warning(f"Secret File '{secrets_file_path}' のパースに失敗しました: {e}")
+            except Exception as e:
+                st.warning(f"Gspread Secret Fileの読み込み中に予期せぬエラーが発生しました: {e}")
 
     # 3. 環境変数からJSON文字列として取得を試みる (Render Environment Variables)
-    gspread_json_str = os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON")
-    if gspread_json_str:
-        try:
-            service_account_info = json.loads(gspread_json_str)
-            if "private_key" in service_account_info:
-                service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-            return service_account_info
-        except json.JSONDecodeError as e:
-            st.error(f"環境変数 'GSPREAD_SERVICE_ACCOUNT_JSON' のJSONパースに失敗しました: {e}")
-        except Exception as e:
-            st.error(f"環境変数からGspreadサービスアカウント情報を読み込み中に予期せぬエラーが発生しました: {e}")
+    if service_account_info_original is None:
+        gspread_json_str = os.getenv("GSPREAD_SERVICE_ACCOUNT_JSON")
+        if gspread_json_str:
+            try:
+                service_account_info_original = json.loads(gspread_json_str)
+            except json.JSONDecodeError as e:
+                st.error(f"環境変数 'GSPREAD_SERVICE_ACCOUNT_JSON' のJSONパースに失敗しました: {e}")
+            except Exception as e:
+                st.error(f"環境変数からGspreadサービスアカウント情報を読み込み中に予期せぬエラーが発生しました: {e}")
 
-    st.error("Gspreadサービスアカウント情報が見つかりません。'.streamlit/secrets.toml'、RenderのSecret Files ('./GSPRED_SECRETS.TOML')、または環境変数 ('GSPREAD_SERVICE_ACCOUNT_JSON') に設定されているか確認してください。")
-    st.stop()
-    return None # 到達しないはず
+    if service_account_info_original is None:
+        st.error("Gspreadサービスアカウント情報が見つかりません。'.streamlit/secrets.toml'、RenderのSecret Files ('./GSPRED_SECRETS.TOML')、または環境変数 ('GSPREAD_SERVICE_ACCOUNT_JSON') に設定されているか確認してください。")
+        st.stop()
+        return None 
+    
+    # 読み取り専用オブジェクトの変更を避けるため、ディープコピーを作成する
+    service_account_info = service_account_info_original.copy()
+
+    # private_key内の改行文字を置換
+    if "private_key" in service_account_info and isinstance(service_account_info["private_key"], str):
+        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+        
+    return service_account_info
+
 
 @st.cache_resource(ttl=3600)
 def get_gspread_client():
