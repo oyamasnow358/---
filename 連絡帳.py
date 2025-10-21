@@ -134,6 +134,7 @@ def append_row_to_sheet(identifier, new_record, identifier_type="id", worksheet_
 
         worksheet = spreadsheet.worksheet(worksheet_name)
         header = worksheet.row_values(1)
+        # NEW: ヘッダーに存在しないキーは追加しないようにする（スプレッドシートの列構成と合わせる）
         ordered_record = [new_record.get(col, '') for col in header]
         worksheet.append_row(ordered_record)
         st.cache_data.clear() # キャッシュをクリアして最新データを再読み込み
@@ -160,10 +161,14 @@ def update_row_in_sheet(identifier, row_index, data_to_update, identifier_type="
 
         worksheet = spreadsheet.worksheet(worksheet_name)
         header = worksheet.row_values(1)
+        updates = []
         for col_name, value in data_to_update.items():
             if col_name in header:
                 col_index = header.index(col_name) + 1 # gspreadは1-indexed
-                worksheet.update_cell(row_index, col_index, value)
+                updates.append(gspread.Cell(row_index, col_index, value))
+        
+        if updates:
+            worksheet.update_cells(updates) # 複数のセル更新を一度に行う
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -472,7 +477,7 @@ def main():
                                     "items_notice": items_notice,
                                     "remarks": remarks,
                                     "image_url": image_url,
-                                    "read_status": "未読"
+                                    "read_status": "未読" # NEW: 新規作成時は「未読」として追加
                                 }
                                 # 個別シートは名前でアクセス
                                 if append_row_to_sheet(selected_individual_sheet_name, new_record, identifier_type="name"): # identifier_type="name" に変更
@@ -576,8 +581,11 @@ def main():
                         if not individual_df.empty:
                             individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
                             individual_df = individual_df.dropna(subset=['timestamp']) 
+                            
+                            # NEW: read_status列が存在しない場合にデフォルト値「未読」を挿入（データフレーム操作なのでスプレッドシートには影響しない）
                             if 'read_status' not in individual_df.columns:
-                                individual_df['read_status'] = '未読'
+                                individual_df['read_status'] = '未読' # スプレッドシートにはこの列を実際に作ってください
+                            
                             individual_df = individual_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
 
                             display_individual_df = individual_df.copy()
@@ -608,22 +616,31 @@ def main():
                                                 st.markdown(f"**添付ファイル:** [ファイルリンク]({row['image_url']})")
 
                                         current_read_status = row['read_status']
+                                        # NEW: 教員向けの既読/未読更新UI
+                                        # ユニークなキーを生成するために、DataFrameのインデックスではなく、
+                                        # その連絡を一意に特定できる情報 (timestampとmessage) を結合してハッシュ化など
+                                        # より堅牢な方法も考えられますが、ここではシンプルに学生名とindexを組み合わせます。
+                                        # Streamlitの`key`引数はユニークである必要があります。
+                                        radio_key = f"read_status_radio_{student_name}_{row['timestamp'].strftime('%Y%m%d%H%M%S')}_{index}"
+
                                         new_read_status = st.radio(
-                                            f"既読ステータスを更新 (生徒: {student_name}, ID: {index})",
+                                            f"既読ステータスを更新", # 生徒名とIDは不要、上記expanderでわかっている
                                             ["未読", "既読"],
                                             index=0 if current_read_status == "未読" else 1,
-                                            key=f"read_status_radio_{student_name}_{index}"
+                                            key=radio_key # ユニークなキーを渡す
                                         )
                                         if new_read_status != current_read_status:
                                             # display_individual_df のインデックスではなく、元の individual_df のインデックスを探す
                                             # DataFrameの表示順と実データ行が異なる場合があるため
-                                            original_row_index = individual_df.index[
+                                            # 【修正点】timestampとmessageで一意に特定し、元のDFでのスプレッドシート行番号を取得
+                                            original_row_locator = individual_df[
                                                 (individual_df['timestamp'] == row['timestamp']) & 
-                                                (individual_df['message'] == row['message']) # タイムスタンプが重複する可能性があるのでメッセージも比較
-                                            ].tolist()
+                                                (individual_df['message'] == row['message']) 
+                                            ]
                                             
-                                            if original_row_index:
-                                                sheet_row_index = original_row_index[0] + 2 # スプレッドシートは1始まりでヘッダー行があるので+2
+                                            if not original_row_locator.empty:
+                                                # スプレッドシートの行は1始まり、かつヘッダー行があるので +2
+                                                sheet_row_index = original_row_locator.index[0] + 2 
                                                 if update_row_in_sheet(individual_sheet_name, sheet_row_index, {"read_status": new_read_status}, identifier_type="name"):
                                                     st.success(f"{student_name} の既読ステータスを '{new_read_status}' に更新しました。")
                                                     st.rerun()
@@ -878,8 +895,11 @@ def main():
                 if not individual_df.empty:
                     individual_df["timestamp"] = pd.to_datetime(individual_df["timestamp"], errors='coerce') 
                     individual_df = individual_df.dropna(subset=['timestamp']) 
+                    
+                    # NEW: read_status列が存在しない場合にデフォルト値「未読」を挿入（データフレーム操作なのでスプレッドシートには影響しない）
                     if 'read_status' not in individual_df.columns:
-                        individual_df['read_status'] = '未読'
+                        individual_df['read_status'] = '未読' # スプレッドシートにはこの列を実際に作ってください
+                    
                     individual_df = individual_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
 
                     for index, row in individual_df.iterrows():
@@ -905,15 +925,18 @@ def main():
 
                                 if not st.session_state[f"mark_read_{selected_student_name}_{index}"]:
                                     st.info("この連絡はまだ既読になっていません。")
-                                    if st.button("既読にする", key=f"read_button_{selected_student_name}_{index}"):
+                                    # 【修正点】ユニークキーの生成と、スプレッドシート行番号の正確な取得
+                                    button_key = f"read_button_{selected_student_name}_{row['timestamp'].strftime('%Y%m%d%H%M%S')}_{index}"
+                                    if st.button("既読にする", key=button_key):
                                         # individual_df の元のインデックスを探す
-                                        original_row_index = individual_df.index[
+                                        original_row_locator = individual_df[
                                             (individual_df['timestamp'] == row['timestamp']) &
                                             (individual_df['message'] == row['message']) # タイムスタンプが重複する可能性があるのでメッセージも比較
-                                        ].tolist()
+                                        ]
                                         
-                                        if original_row_index:
-                                            sheet_row_index = original_row_index[0] + 2 # スプレッドシートは1始まりでヘッダー行があるので+2
+                                        if not original_row_locator.empty:
+                                            # スプレッドシートは1始まりでヘッダー行があるので+2
+                                            sheet_row_index = original_row_locator.index[0] + 2 
                                             if update_row_in_sheet(selected_individual_sheet_name, sheet_row_index, {"read_status": "既読"}, identifier_type="name"): 
                                                 st.session_state[f"mark_read_{selected_student_name}_{index}"] = True
                                                 st.success("連絡を既読にしました。")
@@ -968,15 +991,15 @@ def main():
                                         st.error("画像アップロードに失敗しました。再度お試しください。")
                                         st.stop() 
                                         
-                                    # original_row_index の取得も正確にする
-                                    original_row_index = individual_df.index[
+                                    # 【修正点】original_row_locatorを正確に特定
+                                    original_row_locator = individual_df[
                                         (individual_df['timestamp'] == latest_unreplied['timestamp']) &
                                         (individual_df['message'] == latest_unreplied['message'])
-                                    ].tolist()
+                                    ]
                                     
-                                    if original_row_index:
-                                        sheet_row_index = original_row_index[0] + 2 
-                                        data_to_update = {"home_reply": home_reply}
+                                    if not original_row_locator.empty:
+                                        sheet_row_index = original_row_locator.index[0] + 2 
+                                        data_to_update = {"home_reply": home_reply, "read_status": "既読"} # 返信時は既読とする
                                         if image_url_reply:
                                             data_to_update["image_url"] = image_url_reply
                                         
